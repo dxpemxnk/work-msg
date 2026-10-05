@@ -1,0 +1,92 @@
+.call {
+  display: flex;
+  min-height: 100%;
+  padding: 24px;
+  color: #fff;
+  background: #121722;
+  flex-direction: column;
+}
+
+.header {
+  text-align: center;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.subtitle {
+  margin-top: 4px;
+  color: #aeb8c8;
+}
+
+.grid {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  gap: 16px;
+  padding: 24px 0;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-auto-rows: minmax(210px, 1fr);
+  overflow: auto;
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  min-height: 210px;
+  overflow: hidden;
+  border: 1px solid #303a4b;
+  border-radius: 18px;
+  background: #1c2431;
+  align-items: center;
+  justify-content: center;
+}
+
+.video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.participantName {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  color: #fff;
+  background: rgb(0 0 0 / 55%);
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.controlButton.controlButton,
+.endButton.endButton {
+  width: 54px;
+  height: 54px;
+  color: #fff;
+}
+
+.controlButton.controlButton {
+  background: #303a4b;
+}
+
+.endButton.endButton {
+  background: #d32f2f;
+}
+
+@media (max-width: 640px) {
+  .call {
+    padding: 16px;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}

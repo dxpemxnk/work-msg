@@ -1,0 +1,42 @@
+.search {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  margin-left: 20px;
+}
+
+.field.field {
+  width: min(360px, 100%);
+}
+
+.counter {
+  min-width: 34px;
+  color: #687386;
+  text-align: center;
+}
+
+.compact {
+  margin-left: 0;
+  justify-content: flex-start;
+}
+
+.compact .field.field {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+}
+
+@media (max-width: 720px) {
+  .search {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .field.field {
+    width: 100%;
+  }
+}

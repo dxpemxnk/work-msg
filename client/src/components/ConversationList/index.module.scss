@@ -1,0 +1,24 @@
+.empty {
+  padding: 32px 16px;
+  color: #687386;
+  text-align: center;
+}
+
+.item.item {
+  margin: 0 8px 4px;
+  padding: 10px 16px;
+  border-radius: 12px;
+}
+
+.icon.icon {
+  min-width: 42px;
+}
+
+.time {
+  align-self: flex-start;
+  margin-left: 8px;
+}
+
+.timeText {
+  color: #687386;
+}

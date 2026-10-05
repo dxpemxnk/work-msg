@@ -1,0 +1,25 @@
+.indicator {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.online {
+  background-color: #2e7d32;
+}
+
+.offline {
+  background-color: #9e9e9e;
+}
+
+.label {
+  color: #687386;
+}

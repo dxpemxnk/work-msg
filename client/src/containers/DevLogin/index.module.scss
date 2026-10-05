@@ -1,0 +1,52 @@
+.page {
+  display: grid;
+  min-height: 100vh;
+  padding: 16px;
+  background-color: #eef1f5;
+  place-items: center;
+}
+
+.card.card {
+  width: 100%;
+  max-width: 480px;
+  padding: 32px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.description {
+  margin: 8px 0 24px;
+  color: #687386;
+}
+
+.error {
+  margin-bottom: 16px;
+}
+
+.loading {
+  text-align: center;
+}
+
+.users {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.userButton.userButton {
+  justify-content: flex-start;
+  gap: 16px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.userText {
+  flex: 1;
+  text-align: left;
+}
+
+.userName {
+  font-weight: 500;
+}

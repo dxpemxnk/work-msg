@@ -1,0 +1,51 @@
+.paper.paper {
+  width: 300px;
+  overflow: visible;
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(31, 42, 61, 0.24);
+}
+
+.profile {
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  background-color: #fff;
+}
+
+.cover {
+  height: 78px;
+  background: linear-gradient(135deg, #3158a6, #7189bd);
+}
+
+.avatar {
+  position: absolute;
+  top: 38px;
+  left: 18px;
+  padding: 4px;
+  border-radius: 50%;
+  background-color: #fff;
+}
+
+.details {
+  padding: 48px 18px 18px;
+}
+
+.name {
+  font-weight: 700;
+}
+
+.login {
+  margin-bottom: 8px;
+  color: #687386;
+}
+
+.actions {
+  display: grid;
+  margin-top: 16px;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.actions :global(.MuiButton-root) {
+  text-transform: none;
+}

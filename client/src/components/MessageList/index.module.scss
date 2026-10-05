@@ -1,0 +1,81 @@
+.loading,
+.empty {
+  display: grid;
+  flex: 1;
+  place-items: center;
+}
+
+.list {
+  flex: 1;
+  padding: 16px;
+  overflow: auto;
+}
+
+.loadOlder {
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.empty {
+  height: 100%;
+}
+
+.emptyText,
+.time {
+  color: #687386;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dayDivider {
+  margin: 16px 0;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.pinnedMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #3158a6;
+  font-size: 14px;
+}
+
+.retry.retry {
+  min-width: 0;
+  padding: 0;
+}
+
+.receipt {
+  display: inline-flex;
+  align-items: center;
+}
+
+.receiptIcon {
+  font-size: 16px;
+}
+
+.receiptRead {
+  color: #3158a6;
+}
+
+.receiptDisabled {
+  color: rgba(0, 0, 0, 0.26);
+}
+
+@media (min-width: 900px) {
+  .list {
+    padding-right: 32px;
+    padding-left: 32px;
+  }
+}

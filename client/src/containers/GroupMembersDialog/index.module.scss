@@ -1,0 +1,43 @@
+.error {
+  margin-bottom: 12px;
+}
+
+.invite {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.memberActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.memberDetails {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.memberText {
+  padding-right: 190px;
+}
+
+@media (max-width: 560px) {
+  .invite {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memberText {
+    padding-right: 110px;
+  }
+
+  .memberActions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+}

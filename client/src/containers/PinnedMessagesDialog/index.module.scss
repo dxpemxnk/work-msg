@@ -1,0 +1,115 @@
+.popoverPaper.popoverPaper {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 88px);
+  margin: 0;
+  border-radius: 14px;
+  background-color: #f7f8fa;
+  box-shadow: 0 14px 38px rgba(31, 42, 61, 0.24);
+}
+
+.dialogTitle {
+  display: flex;
+  padding: 14px 18px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.titleText,
+.cardHeader,
+.loading {
+  display: flex;
+  align-items: center;
+}
+
+.titleText {
+  gap: 8px;
+}
+
+.content {
+  padding: 10px;
+}
+
+.list {
+  display: grid;
+  gap: 10px;
+}
+
+.card.card {
+  padding: 12px;
+  border-color: #dfe3ea;
+  border-radius: 12px;
+  background-color: #fff;
+}
+
+.cardHeader {
+  gap: 10px;
+}
+
+.messageLink {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.messageLink {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sender {
+  font-weight: 700;
+}
+
+.date {
+  color: #7b8494;
+}
+
+.body {
+  display: block;
+  width: 100%;
+  margin-top: 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.body:hover,
+.body:focus-visible {
+  background-color: #f3f5f8;
+  color: #3158a6;
+  outline: none;
+}
+
+.quote {
+  margin: 9px 0 0 48px;
+  padding: 6px 9px;
+  border-left: 3px solid #7b61a8;
+  border-radius: 5px;
+  background-color: #f1eff6;
+}
+
+.quoteAuthor {
+  color: #6c4e9b;
+  font-weight: 700;
+}
+
+.loading {
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .popoverPaper.popoverPaper {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 72px);
+  }
+
+  .quote {
+    margin-left: 0;
+  }
+}

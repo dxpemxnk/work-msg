@@ -1,0 +1,172 @@
+.workspace {
+  display: flex;
+  height: 100vh;
+  padding: 0;
+  background-color: #eef1f5;
+}
+
+.sidebar {
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+  flex-direction: column;
+  border-right: 1px solid #dde2ea;
+}
+
+.sidebarHidden {
+  display: none;
+}
+
+.sidebarHeader {
+  padding: 16px;
+}
+
+.brand,
+.conversationTitle {
+  font-weight: 700;
+}
+
+.subtitle,
+.emptyDescription {
+  color: #687386;
+}
+
+.actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.search {
+  margin-top: 16px;
+}
+
+.conversationArea {
+  flex: 1;
+  padding: 8px 0;
+  overflow: auto;
+}
+
+.profile {
+  padding: 12px;
+}
+
+.profileRow {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.profileText {
+  min-width: 0;
+  flex: 1;
+}
+
+.profileName {
+  font-weight: 600;
+}
+
+.content {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.contentHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid #dde2ea;
+}
+
+@media (max-width: 720px) {
+  .contentHeader {
+    flex-wrap: wrap;
+  }
+}
+
+.backButton {
+  display: inline-flex;
+}
+
+.callActions {
+  display: flex;
+  gap: 4px;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  gap: 4px;
+}
+
+.conversationShell {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.chatColumn {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.membersButton.membersButton {
+  min-width: 0;
+  padding: 0;
+  color: #687386;
+  text-transform: none;
+}
+
+.emptyContent {
+  display: grid;
+  flex: 1;
+  padding: 24px;
+  place-items: center;
+}
+
+.emptyText {
+  text-align: center;
+}
+
+.emptyTitle {
+  font-weight: 600;
+}
+
+.emptyDescription {
+  margin-top: 8px;
+}
+
+@media (min-width: 900px) {
+  .workspace {
+    padding: 12px;
+  }
+
+  .sidebar.sidebar,
+  .sidebarHidden.sidebarHidden {
+    display: flex;
+    width: 350px;
+    min-width: 350px;
+    border-radius: 16px;
+  }
+
+  .content.content {
+    margin-left: 12px;
+    border-radius: 16px;
+  }
+
+  .backButton {
+    display: none;
+  }
+}

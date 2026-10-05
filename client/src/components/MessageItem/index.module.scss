@@ -1,0 +1,345 @@
+.row {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.highlighted {
+  animation: message-highlight 1.8s ease-out;
+}
+
+@keyframes message-highlight {
+  0%,
+  35% {
+    background-color: rgba(49, 88, 166, 0.18);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.ownRow {
+  flex-direction: row-reverse;
+}
+
+.groupRow {
+  width: 100%;
+  align-items: flex-start;
+  padding: 5px 8px;
+  border-radius: 8px;
+}
+
+.groupRow:hover {
+  background-color: #f7f8fa;
+}
+
+.avatarBadge :global(.MuiBadge-badge) {
+  box-shadow: 0 0 0 2px #fff;
+}
+
+.onlineBadge :global(.MuiBadge-badge) {
+  background-color: #2e7d32;
+}
+
+.offlineBadge :global(.MuiBadge-badge) {
+  background-color: #9e9e9e;
+}
+
+.messageColumn {
+  display: flex;
+  max-width: min(680px, calc(78% - 44px));
+  min-width: 0;
+  flex-direction: column;
+}
+
+.bubble.bubble {
+  padding: 8px 14px;
+  background-color: #fff;
+}
+
+.ownBubble.ownBubble {
+  border-color: #d5dce7;
+  background-color: #edf1f6;
+}
+
+.groupMessage.groupMessage {
+  max-width: none;
+  padding: 0;
+  border: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.groupRow .messageColumn {
+  max-width: calc(100% - 52px);
+  flex: 1;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.groupMeta > * {
+  justify-content: flex-start;
+  margin-top: 0;
+}
+
+.groupMeta :global(.MuiTypography-caption) {
+  color: #8a93a3;
+}
+
+.pendingBubble {
+  opacity: 0.75;
+}
+
+.sender,
+.replyAuthor {
+  color: #3158a6;
+  font-weight: 700;
+}
+
+.senderButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #3158a6;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.senderButton:hover {
+  text-decoration: underline;
+}
+
+.notificationRow {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 8px;
+  border-top: 1px solid #eef1f5;
+  border-bottom: 1px solid #eef1f5;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.notificationIcon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+}
+
+.notificationIcon :global(.MuiSvgIcon-root) {
+  font-size: 21px;
+}
+
+.call .notificationIcon {
+  color: #29995a;
+}
+
+.pin .notificationIcon {
+  color: #3158a6;
+}
+
+.member-added .notificationIcon {
+  color: #2e7d32;
+}
+
+.member-removed .notificationIcon {
+  color: #8a93a3;
+}
+
+.notificationContent {
+  min-width: 0;
+  flex: 1;
+}
+
+.notificationLine {
+  display: flex;
+  min-height: 30px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.notificationText {
+  color: #687386;
+}
+
+.notificationTarget {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #687386;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notificationTarget:hover {
+  color: #3158a6;
+  text-decoration: underline;
+}
+
+.notificationMeta {
+  display: inline-flex;
+  align-items: center;
+}
+
+.notificationMeta > * {
+  margin-top: 0;
+  justify-content: flex-start;
+}
+
+.notificationMeta :global(.MuiTypography-caption) {
+  color: #8a93a3;
+}
+
+.notificationRow .replyPreview {
+  max-width: 560px;
+  margin-top: 5px;
+  margin-bottom: 0;
+}
+
+.replyPreview {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 3px solid #3158a6;
+  border-radius: 4px;
+  background-color: rgba(49, 88, 166, 0.08);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.replyPreview:hover {
+  background-color: rgba(49, 88, 166, 0.13);
+}
+
+.forwardPreview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border-left: 3px solid #7b61a8;
+  border-radius: 4px;
+  background-color: rgba(123, 97, 168, 0.08);
+  color: #566075;
+}
+
+.forwardText {
+  min-width: 0;
+}
+
+.pinNotificationLink {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pinNotificationLink:hover {
+  color: #3158a6;
+  text-decoration: underline;
+}
+
+.actions {
+  display: flex;
+  align-self: center;
+  padding: 2px;
+  border: 1px solid #dde2ea;
+  border-radius: 10px;
+  background-color: #fff;
+  box-shadow: 0 3px 12px rgba(31, 42, 61, 0.1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.row:hover .actions,
+.row:focus-within .actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ownReactions {
+  justify-content: flex-end;
+}
+
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid #d5dce7;
+  border-radius: 999px;
+  background: #fff;
+  color: #263247;
+  cursor: pointer;
+  font: inherit;
+}
+
+.reaction:hover,
+.selectedReaction {
+  border-color: #3158a6;
+  background-color: #edf1f6;
+}
+
+.reactionPicker {
+  display: flex;
+  padding: 4px 8px;
+}
+
+.contextReactions {
+  padding: 6px 8px 2px;
+  border-top: 1px solid #eef1f5;
+}
+
+.contextReactions > :first-child {
+  padding: 0 8px;
+  color: #687386;
+}
+
+.contextMenu :global(.MuiMenuItem-root) {
+  gap: 10px;
+}
+
+.emoji {
+  font-size: 20px;
+}
+
+@media (hover: none) {
+  .actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
