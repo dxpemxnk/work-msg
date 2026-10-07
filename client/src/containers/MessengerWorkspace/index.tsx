@@ -355,6 +355,7 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
         message={forwardingMessage}
         conversations={messenger.conversations}
         onClose={() => setForwardingMessage(null)}
+        onForward={messenger.forwardMessage}
       />
       <UserProfilePopover
         user={profileUser}

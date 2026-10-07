@@ -22,6 +22,7 @@ import { UserService } from './modules/users/user.service.js';
 import { createSocketServer } from './realtime/create-socket-server.js';
 import { registerSocketHandlers } from './realtime/register-socket-handlers.js';
 import { createSocketEventPublisher } from './realtime/socket-event-publisher.js';
+import { GroupCallRegistry } from './realtime/group-call-registry.js';
 import { registerErrorHandler } from './shared/http/error-response.js';
 import './shared/http/fastify-types.js';
 
@@ -69,7 +70,8 @@ export async function buildApp(config: AppConfig): Promise<BuiltApp> {
   const messageRepository = new MessageRepository(database, conversationRepository);
 
   const io = createSocketServer(app, config);
-  const events = createSocketEventPublisher(io);
+  const groupCalls = new GroupCallRegistry();
+  const events = createSocketEventPublisher(io, conversationRepository, messageRepository, groupCalls);
 
   const userService = new UserService(userRepository);
   const messageService = new MessageService(messageRepository, events, config.messageMaxLength);
@@ -82,7 +84,7 @@ export async function buildApp(config: AppConfig): Promise<BuiltApp> {
   registerUserRoutes(app, userService);
   registerConversationRoutes(app, conversationService);
   registerMessageRoutes(app, messageService);
-  registerSocketHandlers(app, io, userRepository, conversationRepository, messageService);
+  registerSocketHandlers(app, io, userRepository, conversationRepository, messageService, groupCalls);
 
   app.addHook('onClose', async () => {
     await new Promise<void>((resolve) => io.close(() => resolve()));

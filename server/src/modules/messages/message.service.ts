@@ -21,6 +21,12 @@ export class MessageService {
   }
 
   send(userId: string, command: SendMessageCommand) {
+    const result = this.persist(userId, command);
+    this.publishPersisted(result);
+    return { ok: true as const, ...result };
+  }
+
+  persist(userId: string, command: SendMessageCommand) {
     const body = command.body.trim();
     if (!body || body.length > this.maxLength) {
       throw errors.validation(`Сообщение должно содержать от 1 до ${this.maxLength} символов`);
@@ -34,8 +40,11 @@ export class MessageService {
       command.replyToMessageId,
       command.forwardedFromMessageId
     );
+    return result;
+  }
+
+  publishPersisted(result: ReturnType<MessageRepository['append']>): void {
     if (!result.deduplicated) this.events.messageCreated(result.message);
-    return { ok: true as const, ...result };
   }
 
   toggleReaction(userId: string, messageId: string, emoji: string) {

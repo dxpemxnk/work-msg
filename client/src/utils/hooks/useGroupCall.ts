@@ -222,20 +222,36 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
       if (sessionRef.current?.conversationId === conversationId) removePeer(userId);
       setAvailableCall((value) => value?.conversationId === conversationId && value.user.id === userId ? null : value);
     };
+    const onAccessRevoked = ({ conversationId }: { conversationId: string }) => {
+      if (sessionRef.current?.conversationId === conversationId) {
+        cleanup();
+        setNotice('Ваш доступ к групповому звонку отозван');
+      }
+      setAvailableCall((value) => value?.conversationId === conversationId ? null : value);
+    };
+    const onDisconnect = () => {
+      if (!sessionRef.current) return;
+      cleanup();
+      setNotice('Групповой звонок завершён из-за потери связи');
+    };
 
     socket.on('group-call:user-joined', onJoined);
     socket.on('group-call:offer', onOffer);
     socket.on('group-call:answer', onAnswer);
     socket.on('group-call:ice', onIce);
     socket.on('group-call:user-left', onLeft);
+    socket.on('group-call:access-revoked', onAccessRevoked);
+    socket.on('disconnect', onDisconnect);
     return () => {
       socket.off('group-call:user-joined', onJoined);
       socket.off('group-call:offer', onOffer);
       socket.off('group-call:answer', onAnswer);
       socket.off('group-call:ice', onIce);
       socket.off('group-call:user-left', onLeft);
+      socket.off('group-call:access-revoked', onAccessRevoked);
+      socket.off('disconnect', onDisconnect);
     };
-  }, [createConnection, flushCandidates, removePeer, socket, updateSession]);
+  }, [cleanup, createConnection, flushCandidates, removePeer, socket, updateSession]);
 
   useEffect(() => () => cleanup(), [cleanup]);
 

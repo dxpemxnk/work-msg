@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Done, DoneAll, PushPin } from '@mui/icons-material';
 import { Box, Button, CircularProgress, Divider, Tooltip, Typography } from '@mui/material';
 
@@ -51,7 +51,13 @@ export function MessageList({
   onTogglePin,
   onForward,
 }: MessageListProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const previousListRef = useRef<{ firstKey: string | null; lastKey: string | null; scrollHeight: number }>({
+    firstKey: null,
+    lastKey: null,
+    scrollHeight: 0,
+  });
+  const wasNearBottomRef = useRef(true);
   const highlightTimerRef = useRef<number | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const entries = useMemo(
@@ -62,9 +68,32 @@ export function MessageList({
     [messages, pending]
   );
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [entries.length]);
+  useLayoutEffect(() => {
+    const element = listRef.current;
+    if (!element) return;
+    const entryKey = ({ kind, value }: (typeof entries)[number]) => kind === 'saved' ? value.id : value.clientMessageId;
+    const firstKey = entries[0] ? entryKey(entries[0]) : null;
+    const lastEntry = entries.at(-1);
+    const lastKey = lastEntry ? entryKey(lastEntry) : null;
+    const previous = previousListRef.current;
+    const stillContainsPreviousFirst = previous.firstKey !== null && entries.some((entry) => entryKey(entry) === previous.firstKey);
+    const prependedHistory = stillContainsPreviousFirst && firstKey !== previous.firstKey;
+    const sameTimeline = previous.lastKey !== null && entries.some((entry) => entryKey(entry) === previous.lastKey);
+
+    if (prependedHistory) {
+      element.scrollTop += element.scrollHeight - previous.scrollHeight;
+    } else if (!sameTimeline || wasNearBottomRef.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+
+    previousListRef.current = { firstKey, lastKey, scrollHeight: element.scrollHeight };
+    wasNearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  }, [entries]);
+
+  const trackScrollPosition = useCallback(() => {
+    const element = listRef.current;
+    if (element) wasNearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  }, []);
 
   useEffect(() => () => {
     if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
@@ -91,7 +120,7 @@ export function MessageList({
   }
 
   return (
-    <Box className={styles.list}>
+    <Box ref={listRef} className={styles.list} onScroll={trackScrollPosition}>
       {canLoadOlder && (
         <Box className={styles.loadOlder}>
           <Button size="small" disabled={loadingOlder} onClick={onLoadOlder}>
@@ -182,7 +211,6 @@ export function MessageList({
           );
         })}
       </Box>
-      <div ref={bottomRef} />
     </Box>
   );
 }

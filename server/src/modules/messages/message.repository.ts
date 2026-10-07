@@ -146,7 +146,7 @@ export class MessageRepository {
       `)
       .all(...parameters) as MessageRow[];
     const reactions = this.reactionsByMessage(rows.map(({ id }) => id));
-    const messages = rows.map((row) => toMessageDto(row, reactions.get(row.id) ?? []));
+    const messages = rows.map((row) => this.toViewerMessage(row, userId, member.visible_from_sequence, reactions.get(row.id) ?? []));
     return cursor.after === undefined ? messages.reverse() : messages;
   }
 
@@ -164,7 +164,7 @@ export class MessageRepository {
       `)
       .all(conversationId, member.visible_from_sequence, `%${escapedQuery}%`, limit) as MessageRow[];
     const reactions = this.reactionsByMessage(rows.map(({ id }) => id));
-    return rows.map((row) => toMessageDto(row, reactions.get(row.id) ?? []));
+    return rows.map((row) => this.toViewerMessage(row, userId, member.visible_from_sequence, reactions.get(row.id) ?? []));
   }
 
   listPinned(conversationId: string, userId: string): MessageDto[] {
@@ -179,7 +179,22 @@ export class MessageRepository {
       `)
       .all(conversationId, member.visible_from_sequence) as MessageRow[];
     const reactions = this.reactionsByMessage(rows.map(({ id }) => id));
-    return rows.map((row) => toMessageDto(row, reactions.get(row.id) ?? []));
+    return rows.map((row) => this.toViewerMessage(row, userId, member.visible_from_sequence, reactions.get(row.id) ?? []));
+  }
+
+  findVisibleById(messageId: string, userId: string): MessageDto | null {
+    const row = this.database
+      .prepare(`${messageSelect} WHERE m.id = ?`)
+      .get(messageId) as MessageRow | undefined;
+    if (!row) return null;
+    const member = this.conversations.findActiveMember(row.conversation_id, userId);
+    if (!member || row.sequence < member.visible_from_sequence) return null;
+    return this.toViewerMessage(
+      row,
+      userId,
+      member.visible_from_sequence,
+      this.reactionsByMessage([row.id]).get(row.id) ?? []
+    );
   }
 
   togglePin(messageId: string, userId: string): MessageDto {
@@ -247,6 +262,33 @@ export class MessageRepository {
 
   private toHydratedMessage(row: MessageRow): MessageDto {
     return toMessageDto(row, this.reactionsByMessage([row.id]).get(row.id) ?? []);
+  }
+
+  private toViewerMessage(
+    row: MessageRow,
+    userId: string,
+    visibleFromSequence: number,
+    reactions: MessageReactionDto[]
+  ): MessageDto {
+    const message = toMessageDto(row, reactions);
+    if (message.replyTo && message.replyTo.sequence < visibleFromSequence) message.replyTo = null;
+    if (message.forwardedFrom && !this.canViewMessage(userId, message.forwardedFrom.id)) message.forwardedFrom = null;
+    return message;
+  }
+
+  private canViewMessage(userId: string, messageId: string): boolean {
+    return Boolean(this.database
+      .prepare(`
+        SELECT 1
+        FROM messages m
+        JOIN conversation_members cm
+          ON cm.conversation_id = m.conversation_id
+          AND cm.user_id = ?
+          AND cm.left_at IS NULL
+          AND m.sequence >= cm.visible_from_sequence
+        WHERE m.id = ?
+      `)
+      .get(userId, messageId));
   }
 
   private reactionsByMessage(messageIds: string[]): Map<string, MessageReactionDto[]> {

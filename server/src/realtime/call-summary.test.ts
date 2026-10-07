@@ -8,6 +8,8 @@ const activeCall: ActiveCall = {
   conversationId: 'conversation-1',
   callerId: 'caller',
   calleeId: 'callee',
+  callerSocketId: 'caller-socket',
+  calleeSocketId: 'callee-socket',
   mode: 'audio',
   status: 'active',
   createdAt: 1_000,

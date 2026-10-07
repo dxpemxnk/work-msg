@@ -243,8 +243,18 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
     };
     const onEnded = ({ callId, reason }: { callId: string; reason: string }) => {
       if (sessionRef.current?.callId !== callId) return;
-      setNotice(reason === 'peer-offline' ? 'Собеседник отключился' : 'Звонок завершён');
+      const notices: Record<string, string> = {
+        'peer-offline': 'Собеседник отключился',
+        'no-answer': 'На звонок не ответили',
+        'answered-elsewhere': 'Звонок принят в другой вкладке',
+      };
+      setNotice(notices[reason] ?? 'Звонок завершён');
       cleanup();
+    };
+    const onDisconnect = () => {
+      if (!sessionRef.current) return;
+      cleanup();
+      setNotice('Звонок завершён из-за потери связи');
     };
 
     socket.on('call:incoming', onIncoming);
@@ -252,12 +262,14 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
     socket.on('call:ice', onIce);
     socket.on('call:rejected', onRejected);
     socket.on('call:ended', onEnded);
+    socket.on('disconnect', onDisconnect);
     return () => {
       socket.off('call:incoming', onIncoming);
       socket.off('call:answered', onAnswered);
       socket.off('call:ice', onIce);
       socket.off('call:rejected', onRejected);
       socket.off('call:ended', onEnded);
+      socket.off('disconnect', onDisconnect);
     };
   }, [cleanup, flushRemoteCandidates, socket, updateSession]);
 

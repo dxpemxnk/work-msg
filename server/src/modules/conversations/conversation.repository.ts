@@ -4,7 +4,7 @@ import type { SqliteDatabase } from '../../database/database.types.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { errors } from '../../shared/errors/errors.js';
 import { toMessageDto } from '../messages/message.mapper.js';
-import type { MessageRow } from '../messages/message.types.js';
+import type { MessageDto, MessageRow } from '../messages/message.types.js';
 import { toUserDto } from '../users/user.mapper.js';
 import type { UserRepository } from '../users/user.repository.js';
 import type { UserRow } from '../users/user.types.js';
@@ -52,6 +52,19 @@ export class ConversationRepository {
     return rows.map(({ conversation_id }) => conversation_id);
   }
 
+  activeUserIdsVisibleAt(conversationId: string, sequence: number): string[] {
+    const rows = this.database
+      .prepare(`
+        SELECT user_id
+        FROM conversation_members
+        WHERE conversation_id = ?
+          AND left_at IS NULL
+          AND visible_from_sequence <= ?
+      `)
+      .all(conversationId, sequence) as Array<{ user_id: string }>;
+    return rows.map(({ user_id }) => user_id);
+  }
+
   listForUser(userId: string): ConversationDto[] {
     const rows = this.database
       .prepare(`
@@ -64,8 +77,14 @@ export class ConversationRepository {
       `)
       .all(userId) as Array<ConversationRow & MemberRow & { member_id: string }>;
 
-    return rows.map((row) =>
-      this.toDto(row, userId, {
+    if (rows.length === 0) return [];
+    const conversationIds = rows.map(({ id }) => id);
+    const membersByConversation = this.listMembersForConversations(conversationIds);
+    const unreadByConversation = this.unreadCountsForConversations(conversationIds, userId);
+    const lastMessageByConversation = this.lastMessagesForConversations(conversationIds, userId);
+
+    return rows.map((row) => {
+      const member = {
         id: row.member_id,
         conversation_id: row.id,
         user_id: row.user_id,
@@ -74,8 +93,16 @@ export class ConversationRepository {
         last_read_sequence: row.last_read_sequence,
         joined_at: row.joined_at,
         left_at: row.left_at,
-      })
-    );
+      };
+      return this.toDtoFromParts(
+        row,
+        userId,
+        member,
+        membersByConversation.get(row.id) ?? [],
+        unreadByConversation.get(row.id) ?? 0,
+        lastMessageByConversation.get(row.id) ?? null
+      );
+    });
   }
 
   getById(id: string, viewerId: string): ConversationDto {
@@ -189,13 +216,23 @@ export class ConversationRepository {
   }
 
   leaveGroup(conversationId: string, userId: string): void {
-    const { conversation, member } = this.requireMember(conversationId, userId);
-    if (conversation.type !== 'GROUP') throw errors.validation('Нельзя выйти из личного диалога');
-    if (member.role === 'OWNER') throw errors.conflict('Владелец должен сначала передать права');
+    const { member } = this.requireCanLeaveGroup(conversationId, userId);
 
     this.database
       .prepare('UPDATE conversation_members SET left_at = ? WHERE id = ?')
       .run(new Date().toISOString(), member.id);
+  }
+
+  requireCanLeaveGroup(conversationId: string, userId: string): { conversation: ConversationRow; member: MemberRow } {
+    const access = this.requireMember(conversationId, userId);
+    const { conversation, member } = access;
+    if (conversation.type !== 'GROUP') throw errors.validation('Нельзя выйти из личного диалога');
+    if (member.role === 'OWNER') throw errors.conflict('Владелец должен сначала передать права');
+    return access;
+  }
+
+  inTransaction<T>(operation: () => T): T {
+    return this.database.transaction(operation)();
   }
 
   private listMembers(conversationId: string): MemberDto[] {
@@ -221,9 +258,88 @@ export class ConversationRepository {
     }));
   }
 
+  private listMembersForConversations(conversationIds: string[]): Map<string, MemberDto[]> {
+    const placeholders = conversationIds.map(() => '?').join(', ');
+    const rows = this.database
+      .prepare(`
+        SELECT cm.conversation_id, u.id, u.login, u.display_name, u.avatar_color, u.status,
+               cm.role, cm.joined_at, cm.visible_from_sequence, cm.last_read_sequence
+        FROM conversation_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.conversation_id IN (${placeholders}) AND cm.left_at IS NULL
+        ORDER BY u.display_name
+      `)
+      .all(...conversationIds) as Array<
+        UserRow & {
+          conversation_id: string;
+          role: MemberRole;
+          joined_at: string;
+          visible_from_sequence: number;
+          last_read_sequence: number;
+        }
+      >;
+    const result = new Map<string, MemberDto[]>();
+    for (const row of rows) {
+      const members = result.get(row.conversation_id) ?? [];
+      members.push({
+        user: toUserDto(row),
+        role: row.role,
+        joinedAt: row.joined_at,
+        visibleFromSequence: row.visible_from_sequence,
+        lastReadSequence: row.last_read_sequence,
+      });
+      result.set(row.conversation_id, members);
+    }
+    return result;
+  }
+
+  private unreadCountsForConversations(conversationIds: string[], userId: string): Map<string, number> {
+    const placeholders = conversationIds.map(() => '?').join(', ');
+    const rows = this.database
+      .prepare(`
+        SELECT m.conversation_id, COUNT(*) AS count
+        FROM messages m
+        JOIN conversation_members viewer
+          ON viewer.conversation_id = m.conversation_id
+          AND viewer.user_id = ?
+          AND viewer.left_at IS NULL
+        WHERE m.conversation_id IN (${placeholders})
+          AND m.sequence > viewer.last_read_sequence
+          AND m.sequence >= viewer.visible_from_sequence
+          AND m.sender_id <> ?
+        GROUP BY m.conversation_id
+      `)
+      .all(userId, ...conversationIds, userId) as Array<{ conversation_id: string; count: number }>;
+    return new Map(rows.map(({ conversation_id, count }) => [conversation_id, count]));
+  }
+
+  private lastMessagesForConversations(conversationIds: string[], userId: string): Map<string, MessageDto> {
+    const placeholders = conversationIds.map(() => '?').join(', ');
+    const rows = this.database
+      .prepare(`
+        SELECT m.*, u.display_name AS sender_display_name, u.login AS sender_login,
+               u.avatar_color AS sender_avatar_color, u.status AS sender_status
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        JOIN conversation_members viewer
+          ON viewer.conversation_id = m.conversation_id
+          AND viewer.user_id = ?
+          AND viewer.left_at IS NULL
+        WHERE m.conversation_id IN (${placeholders})
+          AND m.sequence >= viewer.visible_from_sequence
+          AND m.sequence = (
+            SELECT MAX(latest.sequence)
+            FROM messages latest
+            WHERE latest.conversation_id = m.conversation_id
+              AND latest.sequence >= viewer.visible_from_sequence
+          )
+      `)
+      .all(userId, ...conversationIds) as MessageRow[];
+    return new Map(rows.map((row) => [row.conversation_id, toMessageDto(row)]));
+  }
+
   private toDto(row: ConversationRow, viewerId: string, member: MemberRow): ConversationDto {
     const members = this.listMembers(row.id);
-    const directPeer = members.find(({ user }) => user.id !== viewerId)?.user.displayName;
     const { count: unreadCount } = this.database
       .prepare(`
         SELECT COUNT(*) AS count
@@ -237,12 +353,31 @@ export class ConversationRepository {
                u.avatar_color AS sender_avatar_color, u.status AS sender_status
         FROM messages m
         JOIN users u ON u.id = m.sender_id
-        WHERE m.conversation_id = ?
+        WHERE m.conversation_id = ? AND m.sequence >= ?
         ORDER BY m.sequence DESC
         LIMIT 1
       `)
-      .get(row.id) as MessageRow | undefined;
+      .get(row.id, member.visible_from_sequence) as MessageRow | undefined;
 
+    return this.toDtoFromParts(
+      row,
+      viewerId,
+      member,
+      members,
+      unreadCount,
+      lastMessageRow ? toMessageDto(lastMessageRow) : null
+    );
+  }
+
+  private toDtoFromParts(
+    row: ConversationRow,
+    viewerId: string,
+    member: MemberRow,
+    members: MemberDto[],
+    unreadCount: number,
+    lastMessage: MessageDto | null
+  ): ConversationDto {
+    const directPeer = members.find(({ user }) => user.id !== viewerId)?.user.displayName;
     return {
       id: row.id,
       type: row.type,
@@ -254,7 +389,7 @@ export class ConversationRepository {
       unreadCount,
       role: member.role,
       members,
-      lastMessage: lastMessageRow ? toMessageDto(lastMessageRow) : null,
+      lastMessage,
       updatedAt: row.updated_at,
     };
   }

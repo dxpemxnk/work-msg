@@ -8,6 +8,8 @@ export interface ActiveCall {
   conversationId: string;
   callerId: string;
   calleeId: string;
+  callerSocketId: string;
+  calleeSocketId: string | null;
   mode: CallMode;
   status: CallStatus;
   createdAt: number;
@@ -17,8 +19,9 @@ export interface ActiveCall {
 export class CallRegistry {
   private readonly calls = new Map<string, ActiveCall>();
   private readonly callIdByUser = new Map<string, string>();
+  private readonly callIdBySocket = new Map<string, string>();
 
-  start(call: Omit<ActiveCall, 'status' | 'createdAt' | 'answeredAt'>): ActiveCall {
+  start(call: Omit<ActiveCall, 'status' | 'createdAt' | 'answeredAt' | 'calleeSocketId'>): ActiveCall {
     if (this.calls.has(call.id)) throw errors.conflict('Звонок уже существует');
     if (this.callIdByUser.has(call.callerId)) throw errors.conflict('Вы уже участвуете в звонке');
     if (this.callIdByUser.has(call.calleeId)) throw errors.conflict('Пользователь занят');
@@ -28,19 +31,23 @@ export class CallRegistry {
       status: 'ringing',
       createdAt: Date.now(),
       answeredAt: null,
+      calleeSocketId: null,
     };
     this.calls.set(call.id, activeCall);
     this.callIdByUser.set(call.callerId, call.id);
     this.callIdByUser.set(call.calleeId, call.id);
+    this.callIdBySocket.set(call.callerSocketId, call.id);
     return activeCall;
   }
 
-  answer(callId: string, userId: string): ActiveCall {
+  answer(callId: string, userId: string, socketId: string): ActiveCall {
     const call = this.requireParticipant(callId, userId);
     if (call.calleeId !== userId) throw errors.forbidden('Ответить может только вызываемый пользователь');
     if (call.status !== 'ringing') throw errors.conflict('Звонок уже принят');
     call.status = 'active';
     call.answeredAt = Date.now();
+    call.calleeSocketId = socketId;
+    this.callIdBySocket.set(socketId, call.id);
     return call;
   }
 
@@ -60,12 +67,26 @@ export class CallRegistry {
     this.calls.delete(call.id);
     this.callIdByUser.delete(call.callerId);
     this.callIdByUser.delete(call.calleeId);
+    this.callIdBySocket.delete(call.callerSocketId);
+    if (call.calleeSocketId) this.callIdBySocket.delete(call.calleeSocketId);
     return call;
   }
 
   endForUser(userId: string): ActiveCall | null {
     const callId = this.callIdByUser.get(userId);
     if (!callId) return null;
+    return this.end(callId, userId);
+  }
+
+  endForSocket(socketId: string): ActiveCall | null {
+    const callId = this.callIdBySocket.get(socketId);
+    if (!callId) return null;
+    const call = this.calls.get(callId);
+    if (!call) {
+      this.callIdBySocket.delete(socketId);
+      return null;
+    }
+    const userId = call.callerSocketId === socketId ? call.callerId : call.calleeId;
     return this.end(callId, userId);
   }
 

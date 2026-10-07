@@ -7,6 +7,7 @@ const call = {
   conversationId: 'conversation-1',
   callerId: 'user-1',
   calleeId: 'user-2',
+  callerSocketId: 'socket-1',
   mode: 'audio' as const,
 };
 
@@ -24,8 +25,18 @@ describe('CallRegistry', () => {
     const registry = new CallRegistry();
     registry.start(call);
 
-    expect(() => registry.answer(call.id, call.callerId)).toThrow('вызываемый');
-    expect(registry.answer(call.id, call.calleeId).status).toBe('active');
+    expect(() => registry.answer(call.id, call.callerId, 'socket-1')).toThrow('вызываемый');
+    expect(registry.answer(call.id, call.calleeId, 'socket-2').status).toBe('active');
+  });
+
+  it('ends only the call owned by the disconnected browser tab', () => {
+    const registry = new CallRegistry();
+    registry.start(call);
+    registry.answer(call.id, call.calleeId, 'socket-2');
+
+    expect(registry.endForSocket('other-tab')).toBeNull();
+    expect(registry.endForSocket('socket-2')?.id).toBe(call.id);
+    expect(registry.hasUser(call.callerId)).toBe(false);
   });
 
   it('ends a call when one of its users goes offline', () => {

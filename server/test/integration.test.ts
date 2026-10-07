@@ -66,6 +66,20 @@ async function send(built: BuiltApp, actor: Session, conversationId: string, cli
   });
 }
 
+function noSocketEvent(socket: Socket, event: string, timeoutMs = 120): Promise<boolean> {
+  return new Promise((resolve) => {
+    const onEvent = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      socket.off(event, onEvent);
+      resolve(true);
+    }, timeoutMs);
+    socket.once(event, onEvent);
+  });
+}
+
 describe('messenger server integration', () => {
   let built: BuiltApp;
 
@@ -247,6 +261,45 @@ describe('messenger server integration', () => {
     expect(memberMutation.statusCode).toBe(403);
   });
 
+  it('does not persist a leave notification when leaving is forbidden', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const created = await built.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations/group',
+      headers: auth(alexey.cookie),
+      payload: { title: 'Выход из группы', memberIds: [maria.user.id] },
+    });
+    const group = body<{ conversation: ConversationDto }>(created).conversation;
+
+    const ownerLeave = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/conversations/${group.id}/leave`,
+      headers: auth(alexey.cookie),
+    });
+    expect(ownerLeave.statusCode).toBe(409);
+    expect(built.repositories.messages.list(group.id, alexey.user.id, { limit: 50 })).toEqual([]);
+    expect(built.repositories.conversations.getById(group.id, alexey.user.id).lastSequence).toBe(0);
+
+    const directConversation = await direct(built, alexey, maria);
+    const directLeave = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/conversations/${directConversation.id}/leave`,
+      headers: auth(maria.cookie),
+    });
+    expect(directLeave.statusCode).toBe(400);
+    expect(built.repositories.messages.list(directConversation.id, alexey.user.id, { limit: 50 })).toEqual([]);
+
+    const memberLeave = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/conversations/${group.id}/leave`,
+      headers: auth(maria.cookie),
+    });
+    expect(memberLeave.statusCode).toBe(204);
+    expect(built.repositories.messages.list(group.id, alexey.user.id, { limit: 50 }).map(({ body: messageBody }) => messageBody))
+      .toEqual(['👤 Мария Петрова покинул(а) беседу']);
+  });
+
   it('enforces visibleFromSequence and revokes a removed member', async () => {
     const alexey = await session(built, 'alexey');
     const maria = await session(built, 'maria');
@@ -340,6 +393,109 @@ describe('messenger server integration', () => {
     expect(message.body).toBe('Онлайн сообщение');
     expect(built.repositories.messages.count()).toBe(1);
     client.close();
+  });
+
+  it('keeps serving messages when a Socket.IO command has no valid acknowledgement callback', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const conversation = await direct(built, alexey, maria);
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const url = `http://127.0.0.1:${address.port}`;
+    const clients = [alexey, maria].map(({ cookie }) => socketClient(url, {
+      transports: ['websocket'],
+      extraHeaders: { Cookie: cookie, Origin: origin },
+    }));
+    const [alexeySocket, mariaSocket] = clients;
+    if (!alexeySocket || !mariaSocket) throw new Error('Test sockets unavailable');
+    await Promise.all(clients.map((client) => new Promise<void>((resolve, reject) => {
+      client.once('connection:ready', () => resolve());
+      client.once('connect_error', reject);
+    })));
+
+    alexeySocket.emit('message:send', {});
+    alexeySocket.emit('message:send', {}, 'not-a-callback');
+
+    const clientMessageId = randomUUID();
+    const delivered = new Promise<MessageDto>((resolve) => mariaSocket.once('message:new', resolve));
+    alexeySocket.emit('message:send', {
+      conversationId: conversation.id,
+      clientMessageId,
+      body: 'Команда без ACK работает',
+    });
+    await expect(delivered).resolves.toMatchObject({ clientMessageId, body: 'Команда без ACK работает' });
+
+    const retry = new Promise<unknown>((resolve) => alexeySocket.emit('message:send', {
+      conversationId: conversation.id,
+      clientMessageId,
+      body: 'Команда без ACK работает',
+    }, resolve));
+    await expect(retry).resolves.toMatchObject({ ok: true, deduplicated: true });
+    expect(built.repositories.messages.count(alexey.user.id, clientMessageId)).toBe(1);
+    clients.forEach((client) => client.close());
+  });
+
+  it('does not leak messages before visibleFromSequence through realtime updates or previews', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const dmitry = await session(built, 'dmitry');
+    const created = await built.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations/group',
+      headers: auth(alexey.cookie),
+      payload: { title: 'Закрытая история', memberIds: [maria.user.id] },
+    });
+    const group = body<{ conversation: ConversationDto }>(created).conversation;
+    const oldResponse = await send(built, maria, group.id, randomUUID(), 'Скрытое старое сообщение');
+    const oldMessage = body<{ message: MessageDto }>(oldResponse).message;
+    await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/conversations/${group.id}/members`,
+      headers: auth(alexey.cookie),
+      payload: { userId: dmitry.user.id },
+    });
+
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const url = `http://127.0.0.1:${address.port}`;
+    const alexeySocket = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: alexey.cookie, Origin: origin } });
+    const dmitrySocket = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: dmitry.cookie, Origin: origin } });
+    await Promise.all([alexeySocket, dmitrySocket].map((client) => new Promise<void>((resolve, reject) => {
+      client.once('connection:ready', () => resolve());
+      client.once('connect_error', reject);
+    })));
+
+    const visibleReaction = new Promise<MessageDto>((resolve) => alexeySocket.once('message:updated', resolve));
+    const hiddenReaction = noSocketEvent(dmitrySocket, 'message:updated');
+    const reactionResponse = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/messages/${oldMessage.id}/reactions`,
+      headers: auth(maria.cookie),
+      payload: { emoji: '👍' },
+    });
+    expect(reactionResponse.statusCode).toBe(200);
+    await expect(visibleReaction).resolves.toMatchObject({ id: oldMessage.id, body: 'Скрытое старое сообщение' });
+    await expect(hiddenReaction).resolves.toBe(true);
+
+    const visiblePin = new Promise<MessageDto>((resolve) => alexeySocket.once('message:updated', resolve));
+    const hiddenPin = noSocketEvent(dmitrySocket, 'message:updated');
+    const pinNotification = new Promise<MessageDto>((resolve) => dmitrySocket.once('message:new', resolve));
+    const pinResponse = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/messages/${oldMessage.id}/pin`,
+      headers: auth(maria.cookie),
+    });
+    expect(pinResponse.statusCode).toBe(200);
+    await expect(visiblePin).resolves.toMatchObject({ id: oldMessage.id, isPinned: true });
+    await expect(hiddenPin).resolves.toBe(true);
+    await expect(pinNotification).resolves.toMatchObject({
+      body: '📌 Закреплено сообщение: Скрытое старое сообщение',
+      replyTo: null,
+    });
+    alexeySocket.close();
+    dmitrySocket.close();
   });
 
   it('synchronizes read state between two sockets of the same user', async () => {
@@ -558,6 +714,43 @@ describe('messenger server integration', () => {
     clients.forEach((client) => client.close());
   });
 
+  it('binds a direct call to the browser tab that started it', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const conversation = await direct(built, alexey, maria);
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const url = `http://127.0.0.1:${address.port}`;
+    const alexeyCallTab = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: alexey.cookie, Origin: origin } });
+    const alexeyOtherTab = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: alexey.cookie, Origin: origin } });
+    const mariaSocket = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: maria.cookie, Origin: origin } });
+    const clients = [alexeyCallTab, alexeyOtherTab, mariaSocket];
+    await Promise.all(clients.map((client) => new Promise<void>((resolve, reject) => {
+      client.once('connection:ready', () => resolve());
+      client.once('connect_error', reject);
+    })));
+
+    const callId = randomUUID();
+    const incoming = new Promise<void>((resolve) => mariaSocket.once('call:incoming', () => resolve()));
+    await new Promise<unknown>((resolve) => alexeyCallTab.emit('call:start', {
+      callId,
+      conversationId: conversation.id,
+      mode: 'audio',
+      offer: { type: 'offer', sdp: 'tab-owned-offer' },
+    }, resolve));
+    await incoming;
+
+    const unrelatedTabDidNotEndCall = noSocketEvent(mariaSocket, 'call:ended');
+    alexeyOtherTab.close();
+    await expect(unrelatedTabDidNotEndCall).resolves.toBe(true);
+
+    const ended = new Promise<{ callId: string; reason: string }>((resolve) => mariaSocket.once('call:ended', resolve));
+    alexeyCallTab.close();
+    await expect(ended).resolves.toEqual({ callId, reason: 'peer-offline' });
+    mariaSocket.close();
+  });
+
   it('relays a group WebRTC mesh call between conversation members', async () => {
     const alexey = await session(built, 'alexey');
     const maria = await session(built, 'maria');
@@ -619,6 +812,74 @@ describe('messenger server integration', () => {
     );
     await expect(left).resolves.toEqual({ conversationId: conversation.id, userId: maria.user.id });
     clients.forEach((client) => client.close());
+  });
+
+  it('revokes group-call signaling when a participant is removed from the conversation', async () => {
+    const alexey = await session(built, 'alexey');
+    const dmitry = await session(built, 'dmitry');
+    const created = await built.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations/group',
+      headers: auth(alexey.cookie),
+      payload: { title: 'Отзыв звонка', memberIds: [dmitry.user.id] },
+    });
+    const conversation = body<{ conversation: ConversationDto }>(created).conversation;
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const url = `http://127.0.0.1:${address.port}`;
+    const alexeySocket = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: alexey.cookie, Origin: origin } });
+    const dmitrySocket = socketClient(url, { transports: ['websocket'], extraHeaders: { Cookie: dmitry.cookie, Origin: origin } });
+    await Promise.all([alexeySocket, dmitrySocket].map((client) => new Promise<void>((resolve, reject) => {
+      client.once('connection:ready', () => resolve());
+      client.once('connect_error', reject);
+    })));
+    await new Promise<unknown>((resolve) => alexeySocket.emit(
+      'group-call:join',
+      { conversationId: conversation.id, mode: 'video' },
+      resolve
+    ));
+    await new Promise<unknown>((resolve) => dmitrySocket.emit(
+      'group-call:join',
+      { conversationId: conversation.id, mode: 'video' },
+      resolve
+    ));
+
+    const revoked = new Promise<{ conversationId: string }>((resolve) => dmitrySocket.once('group-call:access-revoked', resolve));
+    const participantLeft = new Promise<{ conversationId: string; userId: string }>((resolve) =>
+      alexeySocket.once('group-call:user-left', resolve)
+    );
+    const remove = await built.app.inject({
+      method: 'DELETE',
+      url: `/api/v1/conversations/${conversation.id}/members/${dmitry.user.id}`,
+      headers: auth(alexey.cookie),
+    });
+    expect(remove.statusCode).toBe(200);
+    await expect(revoked).resolves.toEqual({ conversationId: conversation.id });
+    await expect(participantLeft).resolves.toEqual({ conversationId: conversation.id, userId: dmitry.user.id });
+
+    const forbiddenOffer = noSocketEvent(alexeySocket, 'group-call:offer');
+    dmitrySocket.emit('group-call:offer', {
+      conversationId: conversation.id,
+      targetUserId: alexey.user.id,
+      description: { type: 'offer', sdp: 'must-not-be-relayed' },
+    });
+    await expect(forbiddenOffer).resolves.toBe(true);
+
+    await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/conversations/${conversation.id}/members`,
+      headers: auth(alexey.cookie),
+      payload: { userId: dmitry.user.id },
+    });
+    const rejoined = new Promise<unknown>((resolve) => dmitrySocket.emit(
+      'group-call:join',
+      { conversationId: conversation.id, mode: 'video' },
+      resolve
+    ));
+    await expect(rejoined).resolves.toMatchObject({ ok: true, participants: [{ id: alexey.user.id }] });
+    alexeySocket.close();
+    dmitrySocket.close();
   });
 });
 

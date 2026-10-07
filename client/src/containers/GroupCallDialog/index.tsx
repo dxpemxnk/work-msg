@@ -30,7 +30,7 @@ function VideoTile({ user, stream, video, muted = false, label }: VideoTileProps
       ) : (
         <UserAvatar user={user} size={88} />
       )}
-      {!muted && <audio ref={audioRef} autoPlay />}
+      {!muted && !video && <audio ref={audioRef} autoPlay />}
       <Typography className={styles.participantName!}>{label ?? user.displayName}</Typography>
     </Box>
   );

@@ -92,6 +92,9 @@ export interface OutboxCommand {
   body: string;
   replyToMessageId?: string;
   replyTo?: ReplyPreview;
+  forwardedFromMessageId?: string;
+  forwardedFrom?: ForwardPreview;
+  blocked?: boolean;
   createdAt: string;
 }
 

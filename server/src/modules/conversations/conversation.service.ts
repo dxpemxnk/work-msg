@@ -71,12 +71,17 @@ export class ConversationService {
 
   leave(userId: string, conversationId: string): void {
     const leavingUser = this.users.requireActive(userId);
-    this.messages.send(userId, {
-      conversationId,
-      clientMessageId: randomUUID(),
-      body: `👤 ${leavingUser.displayName} покинул(а) беседу`,
+    this.conversations.requireCanLeaveGroup(conversationId, userId);
+    const persisted = this.conversations.inTransaction(() => {
+      const message = this.messages.persist(userId, {
+        conversationId,
+        clientMessageId: randomUUID(),
+        body: `👤 ${leavingUser.displayName} покинул(а) беседу`,
+      });
+      this.conversations.leaveGroup(conversationId, userId);
+      return message;
     });
-    this.conversations.leaveGroup(conversationId, userId);
+    this.messages.publishPersisted(persisted);
     this.events.membershipRemoved(conversationId, userId);
   }
 

@@ -5,7 +5,6 @@ import { z } from 'zod';
 import type { ConversationRepository } from '../modules/conversations/conversation.repository.js';
 import { socketSendMessageSchema, socketUpdateReadSchema } from '../modules/messages/message.schemas.js';
 import type { MessageService } from '../modules/messages/message.service.js';
-import type { MessageAck } from '../modules/messages/message.types.js';
 import { userIdFromSocketRequest } from '../modules/auth/session-reader.js';
 import type { UserRepository } from '../modules/users/user.repository.js';
 import { errors } from '../shared/errors/errors.js';
@@ -27,17 +26,30 @@ import { PresenceRegistry } from './presence-registry.js';
 import { toSocketFailure } from './socket-failure.js';
 
 const socketDataSchema = z.object({ userId: uuidSchema });
+const unansweredCallTimeoutMs = 30_000;
+
+function acknowledge(acknowledgement: unknown, result: unknown): void {
+  if (typeof acknowledgement === 'function') {
+    (acknowledgement as (value: unknown) => void)(result);
+  }
+}
 
 export function registerSocketHandlers(
   app: FastifyInstance,
   io: SocketServer,
   users: UserRepository,
   conversations: ConversationRepository,
-  messages: MessageService
+  messages: MessageService,
+  groupCalls: GroupCallRegistry
 ): void {
   const presence = new PresenceRegistry();
   const calls = new CallRegistry();
-  const groupCalls = new GroupCallRegistry();
+  const ringingTimeouts = new Map<string, NodeJS.Timeout>();
+  const clearRingingTimeout = (callId: string) => {
+    const timeout = ringingTimeouts.get(callId);
+    if (timeout) clearTimeout(timeout);
+    ringingTimeouts.delete(callId);
+  };
   const publishCallSummary = (call: ReturnType<CallRegistry['end']>, reason: CallEndReason) => {
     try {
       messages.send(call.callerId, {
@@ -69,10 +81,10 @@ export function registerSocketHandlers(
     socket.emit('presence:snapshot', { userIds: presence.onlineUserIds() });
     if (becameOnline) io.emit('presence:updated', { userId, online: true });
 
-    socket.on('message:send', (payload: unknown, acknowledge: (result: MessageAck) => void) => {
+    socket.on('message:send', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { conversationId, clientMessageId, body, replyToMessageId, forwardedFromMessageId } = socketSendMessageSchema.parse(payload);
-        acknowledge(messages.send(userId, {
+        acknowledge(acknowledgement, messages.send(userId, {
           conversationId,
           clientMessageId,
           body,
@@ -81,20 +93,20 @@ export function registerSocketHandlers(
         }));
       } catch (error) {
         app.log.warn({ err: error, userId }, 'message send failed');
-        acknowledge(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
-    socket.on('read:update', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('read:update', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { conversationId, sequence } = socketUpdateReadSchema.parse(payload);
-        acknowledge?.({ ok: true, ...messages.markRead(userId, conversationId, sequence) });
+        acknowledge(acknowledgement, { ok: true, ...messages.markRead(userId, conversationId, sequence) });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
-    socket.on('call:start', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('call:start', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { callId, conversationId, mode, offer } = startCallSchema.parse(payload);
         const conversation = conversations.getById(conversationId, userId);
@@ -105,7 +117,14 @@ export function registerSocketHandlers(
         if (groupCalls.hasUser(userId)) throw errors.conflict('Сначала завершите групповой звонок');
         if (groupCalls.hasUser(peer.id)) throw errors.conflict('Пользователь участвует в групповом звонке');
 
-        calls.start({ id: callId, conversationId, callerId: userId, calleeId: peer.id, mode });
+        const call = calls.start({
+          id: callId,
+          conversationId,
+          callerId: userId,
+          calleeId: peer.id,
+          callerSocketId: socket.id,
+          mode,
+        });
         io.to(`user:${peer.id}`).emit('call:incoming', {
           callId,
           conversationId,
@@ -113,20 +132,39 @@ export function registerSocketHandlers(
           offer,
           caller: users.requireActive(userId),
         });
-        acknowledge?.({ ok: true });
+        const timeout = setTimeout(() => {
+          ringingTimeouts.delete(callId);
+          try {
+            const current = calls.requireParticipant(callId, call.callerId);
+            if (current.status !== 'ringing') return;
+            calls.end(callId, call.callerId);
+            publishCallSummary(call, 'missed');
+            io.to(`user:${call.callerId}`).to(`user:${call.calleeId}`).emit('call:ended', {
+              callId,
+              reason: 'no-answer',
+            });
+          } catch {
+            // The call already ended through another command.
+          }
+        }, unansweredCallTimeoutMs);
+        timeout.unref();
+        ringingTimeouts.set(callId, timeout);
+        acknowledge(acknowledgement, { ok: true });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
-    socket.on('call:answer', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('call:answer', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { callId, answer } = answerCallSchema.parse(payload);
-        const call = calls.answer(callId, userId);
+        const call = calls.answer(callId, userId, socket.id);
+        clearRingingTimeout(callId);
         io.to(`user:${call.callerId}`).emit('call:answered', { callId, answer });
-        acknowledge?.({ ok: true });
+        socket.to(`user:${call.calleeId}`).emit('call:ended', { callId, reason: 'answered-elsewhere' });
+        acknowledge(acknowledgement, { ok: true });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
@@ -140,40 +178,42 @@ export function registerSocketHandlers(
       }
     });
 
-    socket.on('call:reject', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('call:reject', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { callId } = callIdSchema.parse(payload);
         const call = calls.requireParticipant(callId, userId);
         if (call.calleeId !== userId) throw errors.forbidden('Отклонить звонок может только вызываемый пользователь');
         calls.end(callId, userId);
+        clearRingingTimeout(callId);
         publishCallSummary(call, 'rejected');
         io.to(`user:${call.callerId}`).emit('call:rejected', { callId });
-        acknowledge?.({ ok: true });
+        acknowledge(acknowledgement, { ok: true });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
-    socket.on('call:end', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('call:end', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { callId } = callIdSchema.parse(payload);
         const call = calls.end(callId, userId);
+        clearRingingTimeout(callId);
         publishCallSummary(call, callEndReason(call, userId));
         io.to(`user:${calls.peerId(call, userId)}`).emit('call:ended', { callId, reason: 'peer-ended' });
-        acknowledge?.({ ok: true });
+        acknowledge(acknowledgement, { ok: true });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
-    socket.on('group-call:join', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('group-call:join', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { conversationId, mode } = groupCallJoinSchema.parse(payload);
         const conversation = conversations.getById(conversationId, userId);
         if (conversation.type !== 'GROUP') throw errors.validation('Групповой звонок доступен только в беседе');
         if (calls.hasUser(userId)) throw errors.conflict('Сначала завершите личный звонок');
 
-        const { existingParticipantIds } = groupCalls.join(conversationId, userId, mode);
+        const { existingParticipantIds } = groupCalls.join(conversationId, userId, socket.id, mode);
         const participantIds = existingParticipantIds.filter((id) =>
           conversation.members.some(({ user }) => user.id === id)
         );
@@ -182,13 +222,13 @@ export function registerSocketHandlers(
           mode,
           user: users.requireActive(userId),
         });
-        acknowledge?.({
+        acknowledge(acknowledgement, {
           ok: true,
           mode,
           participants: participantIds.map((id) => users.requireActive(id)),
         });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
@@ -196,7 +236,9 @@ export function registerSocketHandlers(
       try {
         const { conversationId, targetUserId, description } = groupCallRelaySchema.parse(payload);
         if (description.type !== 'offer') throw errors.validation('Ожидалось предложение соединения');
-        groupCalls.requirePeer(conversationId, userId, targetUserId);
+        conversations.requireMember(conversationId, userId);
+        conversations.requireMember(conversationId, targetUserId);
+        groupCalls.requirePeer(conversationId, userId, targetUserId, socket.id);
         io.to(`user:${targetUserId}`).emit('group-call:offer', {
           conversationId,
           fromUser: users.requireActive(userId),
@@ -211,7 +253,9 @@ export function registerSocketHandlers(
       try {
         const { conversationId, targetUserId, description } = groupCallRelaySchema.parse(payload);
         if (description.type !== 'answer') throw errors.validation('Ожидался ответ соединения');
-        groupCalls.requirePeer(conversationId, userId, targetUserId);
+        conversations.requireMember(conversationId, userId);
+        conversations.requireMember(conversationId, targetUserId);
+        groupCalls.requirePeer(conversationId, userId, targetUserId, socket.id);
         io.to(`user:${targetUserId}`).emit('group-call:answer', {
           conversationId,
           fromUserId: userId,
@@ -225,7 +269,9 @@ export function registerSocketHandlers(
     socket.on('group-call:ice', (payload: unknown) => {
       try {
         const { conversationId, targetUserId, candidate } = groupCallIceSchema.parse(payload);
-        groupCalls.requirePeer(conversationId, userId, targetUserId);
+        conversations.requireMember(conversationId, userId);
+        conversations.requireMember(conversationId, targetUserId);
+        groupCalls.requirePeer(conversationId, userId, targetUserId, socket.id);
         io.to(`user:${targetUserId}`).emit('group-call:ice', {
           conversationId,
           fromUserId: userId,
@@ -236,33 +282,34 @@ export function registerSocketHandlers(
       }
     });
 
-    socket.on('group-call:leave', (payload: unknown, acknowledge?: (result: unknown) => void) => {
+    socket.on('group-call:leave', (payload: unknown, acknowledgement: unknown) => {
       try {
         const { conversationId } = groupCallLeaveSchema.parse(payload);
-        groupCalls.requireParticipant(conversationId, userId);
+        groupCalls.requireParticipant(conversationId, userId, socket.id);
         groupCalls.leave(conversationId, userId);
         socket.to(`conversation:${conversationId}`).emit('group-call:user-left', { conversationId, userId });
-        acknowledge?.({ ok: true });
+        acknowledge(acknowledgement, { ok: true });
       } catch (error) {
-        acknowledge?.(toSocketFailure(error));
+        acknowledge(acknowledgement, toSocketFailure(error));
       }
     });
 
     socket.on('disconnect', (reason) => {
+      const groupCallParticipant = groupCalls.leaveForSocket(socket.id);
+      if (groupCallParticipant) {
+        socket.to(`conversation:${groupCallParticipant.call.conversationId}`).emit('group-call:user-left', {
+          conversationId: groupCallParticipant.call.conversationId,
+          userId: groupCallParticipant.userId,
+        });
+      }
+      const call = calls.endForSocket(socket.id);
+      if (call) {
+        clearRingingTimeout(call.id);
+        publishCallSummary(call, callEndReason(call, userId, true));
+        io.to(`user:${calls.peerId(call, userId)}`).emit('call:ended', { callId: call.id, reason: 'peer-offline' });
+      }
       if (presence.disconnect(userId)) {
-        const groupCall = groupCalls.leaveForUser(userId);
-        if (groupCall) {
-          socket.to(`conversation:${groupCall.conversationId}`).emit('group-call:user-left', {
-            conversationId: groupCall.conversationId,
-            userId,
-          });
-        }
         io.emit('presence:updated', { userId, online: false });
-        const call = calls.endForUser(userId);
-        if (call) {
-          publishCallSummary(call, callEndReason(call, userId, true));
-          io.to(`user:${calls.peerId(call, userId)}`).emit('call:ended', { callId: call.id, reason: 'peer-offline' });
-        }
       }
       app.log.info({ socketId: socket.id, userId, reason }, 'socket disconnected');
     });

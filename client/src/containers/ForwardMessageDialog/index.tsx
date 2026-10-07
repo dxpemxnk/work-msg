@@ -2,38 +2,37 @@ import { useState } from 'react';
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, InputLabel, MenuItem, Select } from '@mui/material';
 
 import type { Conversation, Message } from '@/types/messenger';
-import { useSendMessageMutation } from '@services/api/messenger';
-import { apiErrorMessage } from '@utils/apiError';
 
 type ForwardMessageDialogProps = {
   message: Message | null;
   conversations: Conversation[];
   onClose: () => void;
+  onForward: (conversationId: string, message: Message) => Promise<void>;
 };
 
-export function ForwardMessageDialog({ message, conversations, onClose }: ForwardMessageDialogProps) {
+export function ForwardMessageDialog({ message, conversations, onClose, onForward }: ForwardMessageDialogProps) {
   const [conversationId, setConversationId] = useState('');
-  const [sendMessage, { error, isLoading, reset }] = useSendMessageMutation();
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const close = () => {
-    if (isLoading) return;
     setConversationId('');
-    reset();
+    setError(null);
     onClose();
   };
 
   const forward = async () => {
     if (!message || !conversationId) return;
+    setIsLoading(true);
+    setError(null);
     try {
-      await sendMessage({
-        conversationId,
-        clientMessageId: crypto.randomUUID(),
-        body: message.body,
-        forwardedFromMessageId: message.id,
-      }).unwrap();
-      close();
+      await onForward(conversationId, message);
+      setConversationId('');
+      onClose();
     } catch {
-      // RTK Query exposes the error below.
+      setError('Не удалось добавить пересылку в локальную очередь');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -41,7 +40,7 @@ export function ForwardMessageDialog({ message, conversations, onClose }: Forwar
     <Dialog open={Boolean(message)} onClose={close} fullWidth maxWidth="xs">
       <DialogTitle>Переслать сообщение</DialogTitle>
       <DialogContent>
-        {error && <Alert severity="error">{apiErrorMessage(error)}</Alert>}
+        {error && <Alert severity="error">{error}</Alert>}
         <FormControl fullWidth margin="normal">
           <InputLabel id="forward-conversation-label">Беседа</InputLabel>
           <Select

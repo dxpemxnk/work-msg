@@ -25,7 +25,7 @@ import type {
   User,
 } from '@/types/messenger';
 import { apiErrorMessage } from '@utils/apiError';
-import { mergeMessages } from '@utils/messages';
+import { mergeMessages, recoverMessagePages } from '@utils/messages';
 
 export function useMessenger(currentUser: User) {
   const dispatch = useAppDispatch();
@@ -49,6 +49,8 @@ export function useMessenger(currentUser: User) {
   const socketRef = useRef<Socket | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
+  const selectionGenerationRef = useRef(0);
+  const recoveredThroughRef = useRef(new Map<string, number>());
 
   const selectedConversation = useMemo(
     () => conversations.find(({ id }) => id === selectedId) ?? null,
@@ -58,17 +60,58 @@ export function useMessenger(currentUser: User) {
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
+  const updateMessages = useCallback((updater: (current: Message[]) => Message[]) => {
+    setMessages((current) => {
+      const next = updater(current);
+      messagesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearSelectedMessages = useCallback(() => {
+    messagesRef.current = [];
+    setMessages([]);
+  }, []);
+
+  const updateConversationSummary = useCallback((message: Message) => {
+    dispatch(messengerApi.util.updateQueryData('getConversations', undefined, (draft) => {
+      const conversation = draft.find(({ id }) => id === message.conversationId);
+      if (!conversation || message.sequence < conversation.lastSequence) return;
+      const isNewSequence = message.sequence > conversation.lastSequence;
+      conversation.lastMessage = message;
+      conversation.lastSequence = message.sequence;
+      conversation.updatedAt = message.createdAt;
+      if (
+        isNewSequence
+        && message.senderId !== currentUser.id
+        && selectedIdRef.current !== message.conversationId
+      ) {
+        conversation.unreadCount += 1;
+      }
+      draft.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    }));
+  }, [currentUser.id, dispatch]);
+
   const completeMessage = useCallback(async (message: Message) => {
-    setMessages((current) => mergeMessages(current, [message]));
+    if (message.conversationId === selectedIdRef.current) {
+      updateMessages((current) => message.conversationId === selectedIdRef.current
+        ? mergeMessages(current, [message])
+        : current);
+      const recoveredThrough = recoveredThroughRef.current.get(message.conversationId);
+      if (recoveredThrough !== undefined && message.sequence === recoveredThrough + 1) {
+        recoveredThroughRef.current.set(message.conversationId, message.sequence);
+      }
+    }
+    updateConversationSummary(message);
     setPending((current) => current.filter(({ clientMessageId }) => clientMessageId !== message.clientMessageId));
     await removeOutboxCommand(message.clientMessageId);
-    void refetchConversations();
-  }, [refetchConversations]);
+  }, [updateConversationSummary, updateMessages]);
 
-  const sendCommand = useCallback((command: OutboxCommand) => {
+  const sendCommand = useCallback((command: OutboxCommand): Promise<'sent' | 'retryable' | 'blocked'> => new Promise((resolve) => {
     const socket = socketRef.current;
     if (!socket?.connected) {
       setPending((current) => current.map((item) => item.clientMessageId === command.clientMessageId ? { ...item, status: 'failed' } : item));
+      resolve('retryable');
       return;
     }
 
@@ -80,17 +123,43 @@ export function useMessenger(currentUser: User) {
         clientMessageId: command.clientMessageId,
         body: command.body,
         ...(command.replyToMessageId ? { replyToMessageId: command.replyToMessageId } : {}),
+        ...(command.forwardedFromMessageId ? { forwardedFromMessageId: command.forwardedFromMessageId } : {}),
       },
       (timeoutError: Error | null, result?: MessageAck) => {
         if (timeoutError || !result?.ok) {
           setPending((current) => current.map((item) => item.clientMessageId === command.clientMessageId ? { ...item, status: 'failed' } : item));
-          if (result && !result.ok) setError(result.error.message);
+          if (result && !result.ok) {
+            setError(result.error.message);
+            if (!result.error.retryable) {
+              void saveOutboxCommand({ ...command, blocked: true })
+                .catch(() => setError('Не удалось сохранить статус отказа в outbox'))
+                .finally(() => resolve('blocked'));
+              return;
+            }
+          }
+          resolve('retryable');
           return;
         }
-        void completeMessage(result.message).catch(() => setError('Сообщение сохранено, но локальный outbox не очистился'));
+        void completeMessage(result.message)
+          .catch(() => setError('Сообщение сохранено, но локальный outbox не очистился'))
+          .finally(() => resolve('sent'));
       }
     );
-  }, [completeMessage]);
+  }), [completeMessage]);
+
+  const replayOutbox = useCallback(async () => {
+    const commands = await listOutboxCommands(currentUser.id);
+    for (const command of commands) {
+      if (command.blocked || !socketRef.current?.connected) continue;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const outcome = await sendCommand(command);
+        if (outcome !== 'retryable') break;
+        if (attempt < 2 && socketRef.current?.connected) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
+        }
+      }
+    }
+  }, [currentUser.id, sendCommand]);
 
   const markConversationRead = useCallback((conversationId: string, sequence: number) => {
     if (document.visibilityState !== 'visible') return;
@@ -117,19 +186,40 @@ export function useMessenger(currentUser: User) {
       .catch((requestError: unknown) => setError(apiErrorMessage(requestError)));
   }, [markRead, refetchConversations]);
 
-  const recoverSelected = useCallback(async () => {
+  const recoverSelected = useCallback(async (): Promise<boolean> => {
     const conversationId = selectedIdRef.current;
-    if (!conversationId) return;
-    const lastSequence = messagesRef.current.at(-1)?.sequence ?? 0;
+    if (!conversationId) return true;
+    const generation = selectionGenerationRef.current;
+    const recoveredThrough = recoveredThroughRef.current.get(conversationId)
+      ?? messagesRef.current.at(-1)?.sequence
+      ?? 0;
     try {
-      const recovered = await getMessages({ id: conversationId, after: lastSequence, limit: 100 }).unwrap();
-      setMessages((current) => mergeMessages(current, recovered));
-      const latestSequence = recovered.at(-1)?.sequence ?? lastSequence;
-      if (latestSequence > 0) markConversationRead(conversationId, latestSequence);
+      const result = await recoverMessagePages({
+        after: recoveredThrough,
+        limit: 100,
+        isCurrent: () => selectedIdRef.current === conversationId && selectionGenerationRef.current === generation,
+        loadPage: (after, limit) => getMessages({ id: conversationId, after, limit }).unwrap(),
+        acceptPage: (page, pageEnd) => {
+          recoveredThroughRef.current.set(conversationId, pageEnd);
+          updateMessages((current) => (
+            selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
+              ? mergeMessages(current, page)
+              : current
+          ));
+        },
+      });
+      if (!result.completed) return true;
+      if (result.recoveredThrough > 0 && selectedIdRef.current === conversationId) {
+        markConversationRead(conversationId, result.recoveredThrough);
+      }
+      return true;
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setError(`История синхронизирована не полностью: ${apiErrorMessage(requestError)}`);
+      }
+      return false;
     }
-  }, [getMessages, markConversationRead]);
+  }, [getMessages, markConversationRead, updateMessages]);
 
   useEffect(() => {
     let active = true;
@@ -143,7 +233,7 @@ export function useMessenger(currentUser: User) {
           senderDisplayName: currentUser.displayName,
           body: command.body,
           replyTo: command.replyTo ?? null,
-          forwardedFrom: null,
+          forwardedFrom: command.forwardedFrom ?? null,
           createdAt: command.createdAt,
           status: 'failed',
         })));
@@ -160,8 +250,10 @@ export function useMessenger(currentUser: User) {
 
     socket.on('connect', () => {
       setConnection('synchronizing');
-      void recoverSelected().finally(() => setConnection('online'));
-      void listOutboxCommands(currentUser.id).then((commands) => commands.forEach(sendCommand));
+      void recoverSelected().then((synchronized) => {
+        if (socket.connected) setConnection(synchronized ? 'online' : 'synchronizing');
+      });
+      void replayOutbox().catch(() => setError('Не удалось повторить очередь сообщений'));
       void refetchConversations();
     });
     socket.on('disconnect', () => {
@@ -184,27 +276,29 @@ export function useMessenger(currentUser: User) {
       });
     });
     socket.on('message:new', (message: Message) => {
+      void completeMessage(message);
       if (message.conversationId === selectedIdRef.current) {
-        void completeMessage(message);
         if (message.senderId !== currentUser.id) {
           markConversationRead(message.conversationId, message.sequence);
         }
-      } else {
-        void removeOutboxCommand(message.clientMessageId);
       }
-      void refetchConversations();
     });
     socket.on('message:updated', (message: Message) => {
       if (message.conversationId === selectedIdRef.current) {
-        setMessages((current) => current.map((item) => item.id === message.id ? message : item));
+        updateMessages((current) => message.conversationId === selectedIdRef.current
+          ? current.map((item) => item.id === message.id ? message : item)
+          : current);
       }
       dispatch(messengerApi.util.invalidateTags([{ type: 'Message', id: message.conversationId }]));
     });
     socket.on('conversation:updated', () => { void refetchConversations(); });
     socket.on('membership:updated', ({ conversationId, active: membershipActive }: { conversationId: string; active: boolean }) => {
       if (!membershipActive && selectedIdRef.current === conversationId) {
+        selectionGenerationRef.current += 1;
+        recoveredThroughRef.current.delete(conversationId);
         setSelectedId(null);
-        setMessages([]);
+        selectedIdRef.current = null;
+        clearSelectedMessages();
       }
       void refetchConversations();
     });
@@ -217,7 +311,7 @@ export function useMessenger(currentUser: User) {
       socketRef.current = null;
       setRealtimeSocket(null);
     };
-  }, [completeMessage, currentUser.id, dispatch, markConversationRead, recoverSelected, refetchConversations, sendCommand]);
+  }, [clearSelectedMessages, completeMessage, currentUser.id, dispatch, markConversationRead, recoverSelected, refetchConversations, replayOutbox, updateMessages]);
 
   useEffect(() => {
     const readVisibleConversation = () => {
@@ -234,56 +328,89 @@ export function useMessenger(currentUser: User) {
   }, [markConversationRead]);
 
   const selectConversation = useCallback(async (conversation: Conversation) => {
+    const generation = selectionGenerationRef.current + 1;
+    selectionGenerationRef.current = generation;
     setSelectedId(conversation.id);
     selectedIdRef.current = conversation.id;
     setHistoryLoading(true);
     setError(null);
     try {
       const loaded = await getMessages({ id: conversation.id, limit: 50 }).unwrap();
-      setMessages(loaded);
+      if (selectedIdRef.current !== conversation.id || selectionGenerationRef.current !== generation) return;
+      setMessages((current) => {
+        if (selectedIdRef.current !== conversation.id || selectionGenerationRef.current !== generation) return current;
+        messagesRef.current = loaded;
+        return loaded;
+      });
+      recoveredThroughRef.current.set(conversation.id, loaded.at(-1)?.sequence ?? 0);
       setHasOlder(loaded.length === 50);
       const latestSequence = loaded.at(-1)?.sequence;
       if (latestSequence !== undefined) markConversationRead(conversation.id, latestSequence);
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
+      if (selectedIdRef.current === conversation.id && selectionGenerationRef.current === generation) {
+        setError(apiErrorMessage(requestError));
+      }
     } finally {
-      setHistoryLoading(false);
+      if (selectedIdRef.current === conversation.id && selectionGenerationRef.current === generation) {
+        setHistoryLoading(false);
+      }
     }
   }, [getMessages, markConversationRead]);
 
   const loadOlder = useCallback(async () => {
-    const firstMessage = messages[0];
-    if (!selectedId || !firstMessage) return;
+    const conversationId = selectedIdRef.current;
+    const generation = selectionGenerationRef.current;
+    const firstMessage = messagesRef.current[0];
+    if (!conversationId || !firstMessage) return;
     setOlderLoading(true);
     try {
-      const older = await getMessages({ id: selectedId, before: firstMessage.sequence, limit: 50 }).unwrap();
-      setMessages((current) => mergeMessages(older, current));
+      const older = await getMessages({ id: conversationId, before: firstMessage.sequence, limit: 50 }).unwrap();
+      if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return;
+      updateMessages((current) => (
+        selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
+          ? mergeMessages(older, current)
+          : current
+      ));
       setHasOlder(older.length === 50);
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setError(apiErrorMessage(requestError));
+      }
     } finally {
-      setOlderLoading(false);
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setOlderLoading(false);
+      }
     }
-  }, [getMessages, messages, selectedId]);
+  }, [getMessages, updateMessages]);
 
   const ensureMessage = useCallback(async (messageId: string, sequence: number) => {
     const conversationId = selectedIdRef.current;
+    const generation = selectionGenerationRef.current;
     if (!conversationId || messagesRef.current.some(({ id }) => id === messageId)) return;
 
     try {
       const context = await getMessages({ id: conversationId, before: sequence + 1, limit: 50 }).unwrap();
-      setMessages((current) => mergeMessages(context, current));
+      if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return;
+      updateMessages((current) => (
+        selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
+          ? mergeMessages(context, current)
+          : current
+      ));
       setHasOlder(context.length === 50);
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setError(apiErrorMessage(requestError));
+      }
     }
-  }, [getMessages]);
+  }, [getMessages, updateMessages]);
 
   const searchConversationMessages = useCallback(async (query: string) => {
     const conversationId = selectedIdRef.current;
+    const generation = selectionGenerationRef.current;
     if (!conversationId || !query.trim()) return [];
     try {
-      return await searchMessagesRequest({ id: conversationId, query: query.trim(), limit: 50 }).unwrap();
+      const results = await searchMessagesRequest({ id: conversationId, query: query.trim(), limit: 50 }).unwrap();
+      return selectedIdRef.current === conversationId && selectionGenerationRef.current === generation ? results : [];
     } catch (requestError) {
       setError(apiErrorMessage(requestError));
       return [];
@@ -313,35 +440,71 @@ export function useMessenger(currentUser: User) {
         forwardedFrom: null,
         status: 'sending',
       }]);
-      sendCommand(command);
+      void sendCommand(command);
     } catch {
       setError('Не удалось сохранить сообщение в локальную очередь');
     }
   }, [currentUser, selectedId, sendCommand]);
 
   const toggleReaction = useCallback(async (messageId: string, emoji: string) => {
-    if (!selectedId) return;
+    const conversationId = selectedIdRef.current;
+    if (!conversationId) return;
     try {
-      const updated = await toggleReactionRequest({ messageId, emoji, conversationId: selectedId }).unwrap();
-      setMessages((current) => current.map((message) => message.id === updated.id ? updated : message));
+      const updated = await toggleReactionRequest({ messageId, emoji, conversationId }).unwrap();
+      if (selectedIdRef.current === conversationId) {
+        updateMessages((current) => current.map((message) => message.id === updated.id ? updated : message));
+      }
     } catch (requestError) {
       setError(apiErrorMessage(requestError));
     }
-  }, [selectedId, toggleReactionRequest]);
+  }, [toggleReactionRequest, updateMessages]);
+
+  const forwardMessage = useCallback(async (conversationId: string, source: Message) => {
+    const command: OutboxCommand = {
+      userId: currentUser.id,
+      clientMessageId: crypto.randomUUID(),
+      conversationId,
+      body: source.body,
+      forwardedFromMessageId: source.id,
+      forwardedFrom: {
+        id: source.id,
+        senderDisplayName: source.senderDisplayName,
+        body: source.body,
+      },
+      createdAt: new Date().toISOString(),
+    };
+    await saveOutboxCommand(command);
+    setPending((current) => [...current, {
+      ...command,
+      senderId: currentUser.id,
+      senderDisplayName: currentUser.displayName,
+      replyTo: null,
+      forwardedFrom: command.forwardedFrom ?? null,
+      status: 'sending',
+    }]);
+    void sendCommand(command);
+  }, [currentUser, sendCommand]);
 
   const togglePin = useCallback(async (messageId: string) => {
-    if (!selectedId) return;
+    const conversationId = selectedIdRef.current;
+    if (!conversationId) return;
     try {
-      const updated = await togglePinRequest({ messageId, conversationId: selectedId }).unwrap();
-      setMessages((current) => current.map((message) => message.id === updated.id ? updated : message));
+      const updated = await togglePinRequest({ messageId, conversationId }).unwrap();
+      if (selectedIdRef.current === conversationId) {
+        updateMessages((current) => current.map((message) => message.id === updated.id ? updated : message));
+      }
     } catch (requestError) {
       setError(apiErrorMessage(requestError));
     }
-  }, [selectedId, togglePinRequest]);
+  }, [togglePinRequest, updateMessages]);
 
   const retryMessage = useCallback(async (clientMessageId: string) => {
     const command = (await listOutboxCommands(currentUser.id)).find((item) => item.clientMessageId === clientMessageId);
-    if (command) sendCommand(command);
+    if (command) {
+      const retryCommand = { ...command, blocked: false };
+      await saveOutboxCommand(retryCommand);
+      await sendCommand(retryCommand);
+    }
   }, [currentUser.id, sendCommand]);
 
   const openCreatedConversation = useCallback((conversation: Conversation) => {
@@ -350,10 +513,13 @@ export function useMessenger(currentUser: User) {
   }, [dispatch, selectConversation]);
 
   const closeConversation = useCallback(() => {
+    selectionGenerationRef.current += 1;
     setSelectedId(null);
     selectedIdRef.current = null;
-    setMessages([]);
-  }, []);
+    clearSelectedMessages();
+    setHistoryLoading(false);
+    setOlderLoading(false);
+  }, [clearSelectedMessages]);
 
   return {
     users,
@@ -378,6 +544,7 @@ export function useMessenger(currentUser: User) {
     searchConversationMessages,
     sendMessage,
     toggleReaction,
+    forwardMessage,
     togglePin,
     retryMessage,
     openCreatedConversation,
