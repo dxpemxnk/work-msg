@@ -257,6 +257,7 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
             <Box className={styles.conversationShell}>
               <Box className={styles.chatColumn}>
                 <MessageList
+                  key={messenger.selectedConversation.id}
                   messages={messenger.messages}
                   pending={messenger.pending}
                   members={messenger.selectedConversation.members}
@@ -265,8 +266,11 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
                   groupLayout={messenger.selectedConversation.type === 'GROUP'}
                   loading={messenger.historyLoading}
                   loadingOlder={messenger.olderLoading}
+                  loadingNewer={messenger.newerLoading}
                   canLoadOlder={messenger.hasOlder}
+                  canLoadNewer={messenger.hasNewer}
                   onLoadOlder={() => void messenger.loadOlder()}
+                  onLoadNewer={() => void messenger.loadNewer()}
                   onRetry={(id) => void messenger.retryMessage(id)}
                   onReply={setReplyingTo}
                   onToggleReaction={(messageId, emoji) => void messenger.toggleReaction(messageId, emoji)}

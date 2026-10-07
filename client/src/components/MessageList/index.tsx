@@ -1,12 +1,37 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Done, DoneAll, PushPin } from '@mui/icons-material';
 import { Box, Button, CircularProgress, Divider, Tooltip, Typography } from '@mui/material';
 
 import type { Member, Message, PendingMessage, ReplyPreview, User } from '@/types/messenger';
 import { MessageItem } from '@components/MessageItem';
 import { formatDay, formatMessageTime } from '@utils/format';
+import { useMessageVirtualizer } from '@utils/hooks/useMessageVirtualizer';
 import { getReadReceipt, readReceiptLabel } from '@utils/readReceipt';
 import styles from './index.module.scss';
+
+type Entry =
+  | { kind: 'saved'; value: Message }
+  | { kind: 'pending'; value: PendingMessage };
+
+type MeasuredRowProps = {
+  children: ReactNode;
+  index: number;
+  start: number;
+  measureRef: (element: Element | null) => void;
+};
+
+function MeasuredRow({ children, index, start, measureRef }: MeasuredRowProps) {
+  return (
+    <Box
+      ref={measureRef}
+      className={styles.virtualItem}
+      data-index={index}
+      style={{ '--virtual-start': `${start}px` } as CSSProperties}
+    >
+      {children}
+    </Box>
+  );
+}
 
 type MessageListProps = {
   messages: Message[];
@@ -17,8 +42,11 @@ type MessageListProps = {
   groupLayout: boolean;
   loading: boolean;
   loadingOlder: boolean;
+  loadingNewer: boolean;
   canLoadOlder: boolean;
+  canLoadNewer: boolean;
   onLoadOlder: () => void;
+  onLoadNewer: () => void;
   onRetry: (clientMessageId: string) => void;
   onReply: (message: Message) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
@@ -39,8 +67,11 @@ export function MessageList({
   groupLayout,
   loading,
   loadingOlder,
+  loadingNewer,
   canLoadOlder,
+  canLoadNewer,
   onLoadOlder,
+  onLoadNewer,
   onRetry,
   onReply,
   onToggleReaction,
@@ -51,49 +82,18 @@ export function MessageList({
   onTogglePin,
   onForward,
 }: MessageListProps) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const previousListRef = useRef<{ firstKey: string | null; lastKey: string | null; scrollHeight: number }>({
-    firstKey: null,
-    lastKey: null,
-    scrollHeight: 0,
-  });
-  const wasNearBottomRef = useRef(true);
   const highlightTimerRef = useRef<number | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
-  const entries = useMemo(
+  const [jumpTargetId, setJumpTargetId] = useState<string | null>(null);
+  const entries = useMemo<Entry[]>(
     () => [
       ...messages.map((message) => ({ kind: 'saved' as const, value: message })),
       ...pending.map((message) => ({ kind: 'pending' as const, value: message })),
     ],
     [messages, pending]
   );
-
-  useLayoutEffect(() => {
-    const element = listRef.current;
-    if (!element) return;
-    const entryKey = ({ kind, value }: (typeof entries)[number]) => kind === 'saved' ? value.id : value.clientMessageId;
-    const firstKey = entries[0] ? entryKey(entries[0]) : null;
-    const lastEntry = entries.at(-1);
-    const lastKey = lastEntry ? entryKey(lastEntry) : null;
-    const previous = previousListRef.current;
-    const stillContainsPreviousFirst = previous.firstKey !== null && entries.some((entry) => entryKey(entry) === previous.firstKey);
-    const prependedHistory = stillContainsPreviousFirst && firstKey !== previous.firstKey;
-    const sameTimeline = previous.lastKey !== null && entries.some((entry) => entryKey(entry) === previous.lastKey);
-
-    if (prependedHistory) {
-      element.scrollTop += element.scrollHeight - previous.scrollHeight;
-    } else if (!sameTimeline || wasNearBottomRef.current) {
-      element.scrollTop = element.scrollHeight;
-    }
-
-    previousListRef.current = { firstKey, lastKey, scrollHeight: element.scrollHeight };
-    wasNearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-  }, [entries]);
-
-  const trackScrollPosition = useCallback(() => {
-    const element = listRef.current;
-    if (element) wasNearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-  }, []);
+  const entryKey = useCallback((entry: Entry) => entry.value.clientMessageId, []);
+  const virtualList = useMessageVirtualizer({ items: entries, getKey: entryKey });
 
   useEffect(() => () => {
     if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
@@ -101,15 +101,21 @@ export function MessageList({
 
   const jumpToMessage = useCallback(async (replyTo: Pick<ReplyPreview, 'id' | 'sequence'>) => {
     await onEnsureMessage(replyTo.id, replyTo.sequence);
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        document.getElementById(`message-${replyTo.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setHighlightedMessageId(replyTo.id);
-        if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
-        highlightTimerRef.current = window.setTimeout(() => setHighlightedMessageId(null), 2000);
-      });
-    });
+    setJumpTargetId(replyTo.id);
   }, [onEnsureMessage]);
+
+  useEffect(() => {
+    const messageId = jumpTargetId;
+    if (!messageId) return;
+    const localIndex = entries.findIndex(({ kind, value }) => kind === 'saved' && value.id === messageId);
+    if (localIndex < 0) return;
+
+    setJumpTargetId(null);
+    virtualList.scrollToIndex(localIndex);
+    setHighlightedMessageId(messageId);
+    if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightedMessageId(null), 2000);
+  }, [entries, jumpTargetId, virtualList.scrollToIndex]);
 
   useEffect(() => {
     if (focusMessage) void jumpToMessage(focusMessage);
@@ -119,8 +125,16 @@ export function MessageList({
     return <Box className={styles.loading}><CircularProgress /></Box>;
   }
 
+  if (entries.length === 0) {
+    return (
+      <Box className={styles.empty}>
+        <Typography className={styles.emptyText!}>Здесь пока нет сообщений. Начните переписку.</Typography>
+      </Box>
+    );
+  }
+
   return (
-    <Box ref={listRef} className={styles.list} onScroll={trackScrollPosition}>
+    <Box className={styles.listShell}>
       {canLoadOlder && (
         <Box className={styles.loadOlder}>
           <Button size="small" disabled={loadingOlder} onClick={onLoadOlder}>
@@ -128,13 +142,10 @@ export function MessageList({
           </Button>
         </Box>
       )}
-      {entries.length === 0 && (
-        <Box className={styles.empty}>
-          <Typography className={styles.emptyText!}>Здесь пока нет сообщений. Начните переписку.</Typography>
-        </Box>
-      )}
-      <Box className={styles.messages}>
-        {entries.map(({ kind, value }, index) => {
+      <Box ref={virtualList.parentRef} className={styles.list} onScroll={virtualList.onScroll}>
+        <Box className={styles.virtualCanvas} style={{ height: virtualList.totalSize }}>
+          {virtualList.virtualItems.map(({ index, key, start }) => {
+          const { kind, value } = entries[index]!;
           const own = value.senderId === currentUserId;
           const receipt = kind === 'saved' && own
             ? getReadReceipt(value.sequence, members, currentUserId)
@@ -153,7 +164,7 @@ export function MessageList({
                 .map(({ user }) => user)
             : [];
           return (
-            <Box key={value.clientMessageId}>
+            <MeasuredRow key={key} index={index} start={start} measureRef={virtualList.measureElement}>
               {showDay && (
                 <Divider className={styles.dayDivider!}><Typography variant="caption">{formatDay(value.createdAt)}</Typography></Divider>
               )}
@@ -207,10 +218,18 @@ export function MessageList({
                     )}
                   </Box>
               </MessageItem>
-            </Box>
+            </MeasuredRow>
           );
-        })}
+          })}
+        </Box>
       </Box>
+      {canLoadNewer && (
+        <Box className={styles.loadNewer}>
+          <Button size="small" disabled={loadingNewer} onClick={onLoadNewer}>
+            {loadingNewer ? 'Загрузка…' : 'Загрузить следующие сообщения'}
+          </Button>
+        </Box>
+      )}
     </Box>
   );
 }

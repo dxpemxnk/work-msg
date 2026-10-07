@@ -17,7 +17,8 @@
     "db:migrate": "npm run build --silent && node dist/cli/migrate.js",
     "db:seed": "npm run build --silent && node dist/cli/seed.js",
     "db:reset": "npm run build --silent && node dist/cli/reset.js",
-    "db:backup": "npm run build --silent && node dist/cli/backup.js"
+    "db:backup": "npm run build --silent && node dist/cli/backup.js",
+    "benchmark:search": "npm run build --silent && node dist/cli/benchmark-search.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

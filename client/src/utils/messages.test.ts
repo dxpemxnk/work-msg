@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Message } from '@/types/messenger';
 
-import { mergeMessages, recoverMessagePages } from './messages';
+import { limitMessageWindow, mergeMessages, recoverMessagePages } from './messages';
 
 const message = (id: string, clientMessageId: string, sequence: number): Message => ({
   id,
@@ -72,5 +72,27 @@ describe('mergeMessages', () => {
     expect(
       mergeMessages([message('second', 'client-2', 2)], [message('first', 'client-1', 1), message('second', 'client-2', 2)])
     ).toEqual([message('first', 'client-1', 1), message('second', 'client-2', 2)]);
+  });
+});
+
+describe('limitMessageWindow', () => {
+  const messages = Array.from({ length: 6 }, (_, index) => messageAt(index + 1));
+
+  it('keeps the old edge when history is loaded backwards', () => {
+    expect(limitMessageWindow(messages, 'oldest', 4)).toEqual({
+      messages: messages.slice(0, 4),
+      trimmed: true,
+    });
+  });
+
+  it('keeps the new edge when history advances or receives realtime messages', () => {
+    expect(limitMessageWindow(messages, 'newest', 4)).toEqual({
+      messages: messages.slice(-4),
+      trimmed: true,
+    });
+  });
+
+  it('does not copy or mark a window that already fits', () => {
+    expect(limitMessageWindow(messages, 'newest', 10)).toEqual({ messages, trimmed: false });
   });
 });

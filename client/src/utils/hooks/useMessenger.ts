@@ -25,7 +25,7 @@ import type {
   User,
 } from '@/types/messenger';
 import { apiErrorMessage } from '@utils/apiError';
-import { mergeMessages, recoverMessagePages } from '@utils/messages';
+import { limitMessageWindow, mergeMessages, recoverMessagePages } from '@utils/messages';
 
 export function useMessenger(currentUser: User) {
   const dispatch = useAppDispatch();
@@ -43,7 +43,9 @@ export function useMessenger(currentUser: User) {
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
   const [historyLoading, setHistoryLoading] = useState(false);
   const [olderLoading, setOlderLoading] = useState(false);
+  const [newerLoading, setNewerLoading] = useState(false);
   const [hasOlder, setHasOlder] = useState(false);
+  const [hasNewer, setHasNewer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [realtimeSocket, setRealtimeSocket] = useState<Socket | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -51,6 +53,7 @@ export function useMessenger(currentUser: User) {
   const messagesRef = useRef<Message[]>([]);
   const selectionGenerationRef = useRef(0);
   const recoveredThroughRef = useRef(new Map<string, number>());
+  const hasNewerRef = useRef(false);
 
   const selectedConversation = useMemo(
     () => conversations.find(({ id }) => id === selectedId) ?? null,
@@ -60,12 +63,15 @@ export function useMessenger(currentUser: User) {
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
+  const updateHasNewer = useCallback((value: boolean) => {
+    hasNewerRef.current = value;
+    setHasNewer(value);
+  }, []);
+
   const updateMessages = useCallback((updater: (current: Message[]) => Message[]) => {
-    setMessages((current) => {
-      const next = updater(current);
-      messagesRef.current = next;
-      return next;
-    });
+    const next = updater(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
   }, []);
 
   const clearSelectedMessages = useCallback(() => {
@@ -94,9 +100,16 @@ export function useMessenger(currentUser: User) {
 
   const completeMessage = useCallback(async (message: Message) => {
     if (message.conversationId === selectedIdRef.current) {
-      updateMessages((current) => message.conversationId === selectedIdRef.current
-        ? mergeMessages(current, [message])
-        : current);
+      if (hasNewerRef.current) {
+        updateHasNewer(true);
+      } else {
+        updateMessages((current) => {
+          if (message.conversationId !== selectedIdRef.current) return current;
+          const window = limitMessageWindow(mergeMessages(current, [message]), 'newest');
+          if (window.trimmed) setHasOlder(true);
+          return window.messages;
+        });
+      }
       const recoveredThrough = recoveredThroughRef.current.get(message.conversationId);
       if (recoveredThrough !== undefined && message.sequence === recoveredThrough + 1) {
         recoveredThroughRef.current.set(message.conversationId, message.sequence);
@@ -105,7 +118,7 @@ export function useMessenger(currentUser: User) {
     updateConversationSummary(message);
     setPending((current) => current.filter(({ clientMessageId }) => clientMessageId !== message.clientMessageId));
     await removeOutboxCommand(message.clientMessageId);
-  }, [updateConversationSummary, updateMessages]);
+  }, [updateConversationSummary, updateHasNewer, updateMessages]);
 
   const sendCommand = useCallback((command: OutboxCommand): Promise<'sent' | 'retryable' | 'blocked'> => new Promise((resolve) => {
     const socket = socketRef.current;
@@ -201,11 +214,13 @@ export function useMessenger(currentUser: User) {
         loadPage: (after, limit) => getMessages({ id: conversationId, after, limit }).unwrap(),
         acceptPage: (page, pageEnd) => {
           recoveredThroughRef.current.set(conversationId, pageEnd);
-          updateMessages((current) => (
-            selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
-              ? mergeMessages(current, page)
-              : current
-          ));
+          if (hasNewerRef.current) return;
+          updateMessages((current) => {
+            if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return current;
+            const window = limitMessageWindow(mergeMessages(current, page), 'newest');
+            if (window.trimmed) setHasOlder(true);
+            return window.messages;
+          });
         },
       });
       if (!result.completed) return true;
@@ -337,13 +352,11 @@ export function useMessenger(currentUser: User) {
     try {
       const loaded = await getMessages({ id: conversation.id, limit: 50 }).unwrap();
       if (selectedIdRef.current !== conversation.id || selectionGenerationRef.current !== generation) return;
-      setMessages((current) => {
-        if (selectedIdRef.current !== conversation.id || selectionGenerationRef.current !== generation) return current;
-        messagesRef.current = loaded;
-        return loaded;
-      });
+      messagesRef.current = loaded;
+      setMessages(loaded);
       recoveredThroughRef.current.set(conversation.id, loaded.at(-1)?.sequence ?? 0);
       setHasOlder(loaded.length === 50);
+      updateHasNewer(false);
       const latestSequence = loaded.at(-1)?.sequence;
       if (latestSequence !== undefined) markConversationRead(conversation.id, latestSequence);
     } catch (requestError) {
@@ -355,7 +368,7 @@ export function useMessenger(currentUser: User) {
         setHistoryLoading(false);
       }
     }
-  }, [getMessages, markConversationRead]);
+  }, [getMessages, markConversationRead, updateHasNewer]);
 
   const loadOlder = useCallback(async () => {
     const conversationId = selectedIdRef.current;
@@ -368,7 +381,11 @@ export function useMessenger(currentUser: User) {
       if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return;
       updateMessages((current) => (
         selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
-          ? mergeMessages(older, current)
+          ? (() => {
+              const window = limitMessageWindow(mergeMessages(older, current), 'oldest');
+              if (window.trimmed) updateHasNewer(true);
+              return window.messages;
+            })()
           : current
       ));
       setHasOlder(older.length === 50);
@@ -381,7 +398,36 @@ export function useMessenger(currentUser: User) {
         setOlderLoading(false);
       }
     }
-  }, [getMessages, updateMessages]);
+  }, [getMessages, updateHasNewer, updateMessages]);
+
+  const loadNewer = useCallback(async () => {
+    const conversationId = selectedIdRef.current;
+    const generation = selectionGenerationRef.current;
+    const lastMessage = messagesRef.current.at(-1);
+    if (!conversationId || !lastMessage) return;
+    setNewerLoading(true);
+    try {
+      const newer = await getMessages({ id: conversationId, after: lastMessage.sequence, limit: 50 }).unwrap();
+      if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return;
+      updateMessages((current) => {
+        if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return current;
+        const window = limitMessageWindow(mergeMessages(current, newer), 'newest');
+        if (window.trimmed) setHasOlder(true);
+        return window.messages;
+      });
+      updateHasNewer(newer.length === 50);
+      const latestSequence = newer.at(-1)?.sequence;
+      if (latestSequence !== undefined) markConversationRead(conversationId, latestSequence);
+    } catch (requestError) {
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setError(apiErrorMessage(requestError));
+      }
+    } finally {
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setNewerLoading(false);
+      }
+    }
+  }, [getMessages, markConversationRead, updateHasNewer, updateMessages]);
 
   const ensureMessage = useCallback(async (messageId: string, sequence: number) => {
     const conversationId = selectedIdRef.current;
@@ -389,20 +435,25 @@ export function useMessenger(currentUser: User) {
     if (!conversationId || messagesRef.current.some(({ id }) => id === messageId)) return;
 
     try {
-      const context = await getMessages({ id: conversationId, before: sequence + 1, limit: 50 }).unwrap();
+      const [before, after] = await Promise.all([
+        getMessages({ id: conversationId, before: sequence + 1, limit: 25 }).unwrap(),
+        getMessages({ id: conversationId, after: sequence, limit: 25 }).unwrap(),
+      ]);
       if (selectedIdRef.current !== conversationId || selectionGenerationRef.current !== generation) return;
-      updateMessages((current) => (
-        selectedIdRef.current === conversationId && selectionGenerationRef.current === generation
-          ? mergeMessages(context, current)
-          : current
-      ));
-      setHasOlder(context.length === 50);
+      const context = mergeMessages(before, after);
+      if (!context.some(({ id }) => id === messageId)) {
+        setError('Не удалось загрузить выбранное сообщение');
+        return;
+      }
+      updateMessages(() => context);
+      setHasOlder(before.length === 25);
+      updateHasNewer(after.length === 25);
     } catch (requestError) {
       if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
         setError(apiErrorMessage(requestError));
       }
     }
-  }, [getMessages, updateMessages]);
+  }, [getMessages, updateHasNewer, updateMessages]);
 
   const searchConversationMessages = useCallback(async (query: string) => {
     const conversationId = selectedIdRef.current;
@@ -519,7 +570,9 @@ export function useMessenger(currentUser: User) {
     clearSelectedMessages();
     setHistoryLoading(false);
     setOlderLoading(false);
-  }, [clearSelectedMessages]);
+    setNewerLoading(false);
+    updateHasNewer(false);
+  }, [clearSelectedMessages, updateHasNewer]);
 
   return {
     users,
@@ -536,10 +589,13 @@ export function useMessenger(currentUser: User) {
     conversationsLoading,
     historyLoading,
     olderLoading,
+    newerLoading,
     hasOlder,
+    hasNewer,
     setError,
     selectConversation,
     loadOlder,
+    loadNewer,
     ensureMessage,
     searchConversationMessages,
     sendMessage,

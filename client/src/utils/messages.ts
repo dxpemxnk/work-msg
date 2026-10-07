@@ -1,5 +1,7 @@
 import type { Message } from '@/types/messenger';
 
+export const MESSAGE_WINDOW_LIMIT = 500;
+
 export function mergeMessages(current: Message[], incoming: Message[]): Message[] {
   const byId = new Map<string, Message>();
   const byClientId = new Map<string, string>();
@@ -12,6 +14,18 @@ export function mergeMessages(current: Message[], incoming: Message[]): Message[
   }
 
   return [...byId.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+export function limitMessageWindow(
+  messages: Message[],
+  keep: 'oldest' | 'newest',
+  limit = MESSAGE_WINDOW_LIMIT
+): { messages: Message[]; trimmed: boolean } {
+  if (messages.length <= limit) return { messages, trimmed: false };
+  return {
+    messages: keep === 'oldest' ? messages.slice(0, limit) : messages.slice(-limit),
+    trimmed: true,
+  };
 }
 
 type RecoverMessagePagesOptions = {

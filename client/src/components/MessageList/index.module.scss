@@ -5,14 +5,26 @@
   place-items: center;
 }
 
+.listShell {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .list {
   flex: 1;
-  padding: 16px;
+  min-height: 0;
   overflow: auto;
 }
 
 .loadOlder {
-  margin-bottom: 16px;
+  padding: 16px 16px 6px;
+  text-align: center;
+}
+
+.loadNewer {
+  padding: 6px 16px 16px;
   text-align: center;
 }
 
@@ -25,10 +37,19 @@
   color: #687386;
 }
 
-.messages {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.virtualItem {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 16px 10px;
+  transform: translateY(var(--virtual-start));
+}
+
+.virtualCanvas {
+  position: relative;
+  width: 100%;
 }
 
 .dayDivider {
@@ -74,7 +95,13 @@
 }
 
 @media (min-width: 900px) {
-  .list {
+  .virtualItem {
+    padding-right: 32px;
+    padding-left: 32px;
+  }
+
+  .loadOlder,
+  .loadNewer {
     padding-right: 32px;
     padding-left: 32px;
   }
