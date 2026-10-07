@@ -10,6 +10,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
+          ui: ['@mui/material', '@mui/icons-material', '@emotion/react', '@emotion/styled'],
           application: ['@reduxjs/toolkit', 'formik', 'yup', 'socket.io-client'],
         },
       },
