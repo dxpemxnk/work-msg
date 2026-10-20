@@ -154,7 +154,7 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
             <UserAvatar user={currentUser} size={38} />
             <Box className={styles.profileText}>
               <Typography className={styles.profileName!} noWrap>{currentUser.displayName}</Typography>
-              <ConnectionStatus state={messenger.connection} />
+              <ConnectionStatus state={messenger.connection} onRetry={() => void messenger.retrySynchronization()} />
             </Box>
             <IconButton size="small" onClick={() => void handleLogout()} aria-label="Сменить пользователя"><Logout /></IconButton>
           </Box>

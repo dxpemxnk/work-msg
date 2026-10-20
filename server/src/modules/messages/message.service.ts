@@ -64,7 +64,7 @@ export class MessageService {
       this.send(userId, {
         conversationId: message.conversationId,
         clientMessageId: randomUUID(),
-        body: `📌 Закреплено сообщение: ${message.body.slice(0, 120)}`,
+        body: '📌 Закреплено сообщение',
         replyToMessageId: message.id,
       });
     }

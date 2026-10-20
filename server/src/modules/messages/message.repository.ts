@@ -197,6 +197,48 @@ export class MessageRepository {
     );
   }
 
+  findVisibleForViewers(
+    messageId: string,
+    viewers: Array<{ userId: string; visibleFromSequence: number }>
+  ): Map<string, MessageDto> {
+    const result = new Map<string, MessageDto>();
+    if (viewers.length === 0) return result;
+
+    const row = this.database
+      .prepare(`${messageSelect} WHERE m.id = ?`)
+      .get(messageId) as MessageRow | undefined;
+    if (!row) return result;
+
+    const eligibleViewers = viewers.filter(({ visibleFromSequence }) => row.sequence >= visibleFromSequence);
+    if (eligibleViewers.length === 0) return result;
+
+    const reactions = this.reactionsByMessage([row.id]).get(row.id) ?? [];
+    let forwardViewerIds = new Set<string>();
+    if (row.forwarded_from_message_id) {
+      const placeholders = eligibleViewers.map(() => '?').join(', ');
+      const rows = this.database
+        .prepare(`
+          SELECT cm.user_id
+          FROM messages source
+          JOIN conversation_members cm
+            ON cm.conversation_id = source.conversation_id
+            AND cm.left_at IS NULL
+            AND source.sequence >= cm.visible_from_sequence
+          WHERE source.id = ? AND cm.user_id IN (${placeholders})
+        `)
+        .all(row.forwarded_from_message_id, ...eligibleViewers.map(({ userId }) => userId)) as Array<{ user_id: string }>;
+      forwardViewerIds = new Set(rows.map(({ user_id }) => user_id));
+    }
+
+    for (const { userId, visibleFromSequence } of eligibleViewers) {
+      const message = toMessageDto(row, reactions);
+      if (message.replyTo && message.replyTo.sequence < visibleFromSequence) message.replyTo = null;
+      if (message.forwardedFrom && !forwardViewerIds.has(userId)) message.forwardedFrom = null;
+      result.set(userId, message);
+    }
+    return result;
+  }
+
   togglePin(messageId: string, userId: string): MessageDto {
     const toggle = this.database.transaction(() => {
       const message = this.database
@@ -218,7 +260,7 @@ export class MessageRepository {
           .prepare('INSERT INTO conversation_pins(conversation_id, message_id, pinned_by_id, pinned_at) VALUES (?, ?, ?, ?)')
           .run(message.conversation_id, messageId, userId, new Date().toISOString());
       }
-      return this.requireById(messageId);
+      return this.requireVisibleById(messageId, userId);
     });
     return toggle();
   }
@@ -246,18 +288,16 @@ export class MessageRepository {
           .run(messageId, userId, emoji, new Date().toISOString());
       }
 
-      return this.requireById(messageId);
+      return this.requireVisibleById(messageId, userId);
     });
 
     return toggle();
   }
 
-  private requireById(messageId: string): MessageDto {
-    const row = this.database
-      .prepare(`${messageSelect} WHERE m.id = ?`)
-      .get(messageId) as MessageRow | undefined;
-    if (!row) throw errors.notFound('Сообщение не найдено');
-    return this.toHydratedMessage(row);
+  private requireVisibleById(messageId: string, userId: string): MessageDto {
+    const message = this.findVisibleById(messageId, userId);
+    if (!message) throw errors.notFound('Сообщение не найдено');
+    return message;
   }
 
   private toHydratedMessage(row: MessageRow): MessageDto {

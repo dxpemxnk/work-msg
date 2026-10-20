@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import type { LightMyRequestResponse } from 'fastify';
 import { io as socketClient, type Socket } from 'socket.io-client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildApp, type BuiltApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
@@ -57,12 +57,19 @@ async function direct(built: BuiltApp, actor: Session, peer: Session): Promise<C
   return body<{ conversation: ConversationDto }>(response).conversation;
 }
 
-async function send(built: BuiltApp, actor: Session, conversationId: string, clientMessageId: string, text: string) {
+async function send(
+  built: BuiltApp,
+  actor: Session,
+  conversationId: string,
+  clientMessageId: string,
+  text: string,
+  replyToMessageId?: string
+) {
   return built.app.inject({
     method: 'POST',
     url: `/api/v1/conversations/${conversationId}/messages`,
     headers: auth(actor.cookie),
-    payload: { clientMessageId, body: text },
+    payload: { clientMessageId, body: text, ...(replyToMessageId ? { replyToMessageId } : {}) },
   });
 }
 
@@ -226,7 +233,7 @@ describe('messenger server integration', () => {
     expect(body<{ messages: MessageDto[] }>(pinned).messages.map(({ id }) => id)).toEqual([original.id]);
     const historyWithPinNotice = built.repositories.messages.list(sourceConversation.id, alexey.user.id, { limit: 50 });
     expect(historyWithPinNotice.at(-1)).toMatchObject({
-      body: '📌 Закреплено сообщение: Важная информация',
+      body: '📌 Закреплено сообщение',
       replyTo: { id: original.id, sequence: original.sequence },
     });
 
@@ -491,11 +498,97 @@ describe('messenger server integration', () => {
     await expect(visiblePin).resolves.toMatchObject({ id: oldMessage.id, isPinned: true });
     await expect(hiddenPin).resolves.toBe(true);
     await expect(pinNotification).resolves.toMatchObject({
-      body: '📌 Закреплено сообщение: Скрытое старое сообщение',
+      body: '📌 Закреплено сообщение',
       replyTo: null,
     });
+    const restrictedHistory = built.repositories.messages.list(group.id, dmitry.user.id, { limit: 50 });
+    expect(restrictedHistory.map(({ body: messageBody }) => messageBody)).not.toContain('Скрытое старое сообщение');
+    expect(built.repositories.messages.search(group.id, dmitry.user.id, 'Скрытое старое сообщение', 50)).toEqual([]);
+    expect(
+      built.repositories.conversations.listForUser(dmitry.user.id).find(({ id }) => id === group.id)?.lastMessage
+    ).toMatchObject({ body: '📌 Закреплено сообщение', replyTo: null });
+
+    const visibleReply = body<{ message: MessageDto }>(
+      await send(built, maria, group.id, randomUUID(), 'Новый ответ', oldMessage.id)
+    ).message;
+    const historyWithReply = built.repositories.messages.list(group.id, dmitry.user.id, { limit: 50 });
+    expect(historyWithReply.find(({ id }) => id === visibleReply.id)?.replyTo).toBeNull();
+
+    const viewerReaction = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/messages/${visibleReply.id}/reactions`,
+      headers: auth(dmitry.cookie),
+      payload: { emoji: '🔥' },
+    });
+    expect(viewerReaction.statusCode).toBe(200);
+    expect(body<{ message: MessageDto }>(viewerReaction).message).toMatchObject({
+      id: visibleReply.id,
+      replyTo: null,
+    });
+
+    const viewerPin = await built.app.inject({
+      method: 'POST',
+      url: `/api/v1/messages/${visibleReply.id}/pin`,
+      headers: auth(dmitry.cookie),
+    });
+    expect(viewerPin.statusCode).toBe(200);
+    expect(body<{ message: MessageDto }>(viewerPin).message).toMatchObject({
+      id: visibleReply.id,
+      replyTo: null,
+    });
+
+    const alexeyView = built.repositories.messages.findVisibleById(visibleReply.id, alexey.user.id);
+    expect(alexeyView?.replyTo).toMatchObject({ id: oldMessage.id, body: 'Скрытое старое сообщение' });
     alexeySocket.close();
     dmitrySocket.close();
+  });
+
+  it('hydrates a realtime message once and skips payload work for offline members', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const group = body<{ conversation: ConversationDto }>(await built.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations/group',
+      headers: auth(alexey.cookie),
+      payload: { title: 'Publisher SQL', memberIds: [maria.user.id] },
+    })).conversation;
+
+    const offlineMessage = built.services.messages.persist(alexey.user.id, {
+      conversationId: group.id,
+      clientMessageId: randomUUID(),
+      body: 'Все офлайн',
+    });
+    const offlinePrepare = vi.spyOn(built.database, 'prepare');
+    built.services.messages.publishPersisted(offlineMessage);
+    const offlineSelects = offlinePrepare.mock.calls.filter(([sql]) => /^\s*SELECT/i.test(String(sql))).length;
+    offlinePrepare.mockRestore();
+    expect(offlineSelects).toBe(1);
+
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const socket = socketClient(`http://127.0.0.1:${address.port}`, {
+      transports: ['websocket'],
+      extraHeaders: { Cookie: alexey.cookie, Origin: origin },
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connection:ready', () => resolve());
+      socket.once('connect_error', reject);
+    });
+
+    const onlineMessage = built.services.messages.persist(maria.user.id, {
+      conversationId: group.id,
+      clientMessageId: randomUUID(),
+      body: 'Один получатель онлайн',
+    });
+    const received = new Promise<MessageDto>((resolve) => socket.once('message:new', resolve));
+    const onlinePrepare = vi.spyOn(built.database, 'prepare');
+    built.services.messages.publishPersisted(onlineMessage);
+    await expect(received).resolves.toMatchObject({ body: 'Один получатель онлайн' });
+    const onlineSelects = onlinePrepare.mock.calls.filter(([sql]) => /^\s*SELECT/i.test(String(sql))).length;
+    onlinePrepare.mockRestore();
+    expect(onlineSelects).toBe(3);
+    socket.close();
   });
 
   it('synchronizes read state between two sockets of the same user', async () => {

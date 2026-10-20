@@ -12,9 +12,12 @@ export function createSocketEventPublisher(
   groupCalls: GroupCallRegistry
 ): EventPublisher {
   const emitVisibleMessage = (event: 'message:new' | 'message:updated', messageId: string, conversationId: string, sequence: number) => {
-    for (const userId of conversations.activeUserIdsVisibleAt(conversationId, sequence)) {
-      const visibleMessage = messages.findVisibleById(messageId, userId);
-      if (visibleMessage) io.to(`user:${userId}`).emit(event, visibleMessage);
+    const connectedViewers = conversations
+      .activeViewersVisibleAt(conversationId, sequence)
+      .filter(({ userId }) => (io.sockets.adapter.rooms.get(`user:${userId}`)?.size ?? 0) > 0);
+    const visibleMessages = messages.findVisibleForViewers(messageId, connectedViewers);
+    for (const [userId, visibleMessage] of visibleMessages) {
+      io.to(`user:${userId}`).emit(event, visibleMessage);
     }
   };
 

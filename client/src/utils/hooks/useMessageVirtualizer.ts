@@ -1,19 +1,12 @@
 import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { resolveMessageListUpdate, type MessageScrollSnapshot } from '@utils/messageVirtualization';
 
 type MessageVirtualizerOptions<T> = {
   items: T[];
   getKey: (item: T) => string;
   estimateSize?: number;
   overscan?: number;
-};
-
-type ScrollSnapshot = {
-  firstKey: string | undefined;
-  lastKey: string | undefined;
-  anchorKey: string | undefined;
-  offsetWithinAnchor: number;
-  nearBottom: boolean;
 };
 
 export function useMessageVirtualizer<T>({
@@ -24,7 +17,7 @@ export function useMessageVirtualizer<T>({
 }: MessageVirtualizerOptions<T>) {
   const parentRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
-  const snapshotRef = useRef<ScrollSnapshot | null>(null);
+  const snapshotRef = useRef<MessageScrollSnapshot | null>(null);
   const keys = useMemo(() => items.map(getKey), [getKey, items]);
 
   const virtualizer = useVirtualizer({
@@ -35,7 +28,7 @@ export function useMessageVirtualizer<T>({
     overscan,
   });
 
-  const captureSnapshot = useCallback((): ScrollSnapshot | null => {
+  const captureSnapshot = useCallback((): MessageScrollSnapshot | null => {
     const element = parentRef.current;
     if (!element) return null;
     const scrollTop = element.scrollTop;
@@ -61,17 +54,16 @@ export function useMessageVirtualizer<T>({
       initializedRef.current = true;
       virtualizer.scrollToIndex(items.length - 1, { align: 'end' });
     } else if (previous) {
-      const prepended = previous.firstKey !== keys[0] && previous.anchorKey !== undefined;
-      const appended = previous.lastKey !== keys.at(-1) && previous.firstKey === keys[0];
+      const update = resolveMessageListUpdate(previous, keys[0], keys.at(-1));
 
-      if (prepended) {
+      if (update === 'follow-end') {
+        virtualizer.scrollToIndex(items.length - 1, { align: 'end' });
+      } else if (update === 'preserve-anchor') {
         const anchorIndex = keys.indexOf(previous.anchorKey!);
         if (anchorIndex >= 0) {
           virtualizer.scrollToIndex(anchorIndex, { align: 'start' });
           parentRef.current.scrollTop += previous.offsetWithinAnchor;
         }
-      } else if (appended && previous.nearBottom) {
-        virtualizer.scrollToIndex(items.length - 1, { align: 'end' });
       }
     }
 

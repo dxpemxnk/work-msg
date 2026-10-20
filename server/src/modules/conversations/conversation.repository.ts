@@ -53,16 +53,23 @@ export class ConversationRepository {
   }
 
   activeUserIdsVisibleAt(conversationId: string, sequence: number): string[] {
+    return this.activeViewersVisibleAt(conversationId, sequence).map(({ userId }) => userId);
+  }
+
+  activeViewersVisibleAt(conversationId: string, sequence: number): Array<{ userId: string; visibleFromSequence: number }> {
     const rows = this.database
       .prepare(`
-        SELECT user_id
+        SELECT user_id, visible_from_sequence
         FROM conversation_members
         WHERE conversation_id = ?
           AND left_at IS NULL
           AND visible_from_sequence <= ?
       `)
-      .all(conversationId, sequence) as Array<{ user_id: string }>;
-    return rows.map(({ user_id }) => user_id);
+      .all(conversationId, sequence) as Array<{ user_id: string; visible_from_sequence: number }>;
+    return rows.map(({ user_id, visible_from_sequence }) => ({
+      userId: user_id,
+      visibleFromSequence: visible_from_sequence,
+    }));
   }
 
   listForUser(userId: string): ConversationDto[] {

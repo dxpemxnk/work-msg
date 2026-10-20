@@ -25,7 +25,10 @@ import type {
   User,
 } from '@/types/messenger';
 import { apiErrorMessage } from '@utils/apiError';
-import { limitMessageWindow, mergeMessages, recoverMessagePages } from '@utils/messages';
+import { limitMessageWindow, mergeMessages, recoverMessagePages, retryTask } from '@utils/messages';
+import { SerialCommandQueue } from '@utils/serialCommandQueue';
+
+type SendOutcome = 'sent' | 'retryable' | 'blocked';
 
 export function useMessenger(currentUser: User) {
   const dispatch = useAppDispatch();
@@ -54,6 +57,8 @@ export function useMessenger(currentUser: User) {
   const selectionGenerationRef = useRef(0);
   const recoveredThroughRef = useRef(new Map<string, number>());
   const hasNewerRef = useRef(false);
+  const synchronizationRunRef = useRef<Promise<boolean> | null>(null);
+  const commandQueueRef = useRef(new SerialCommandQueue<OutboxCommand, SendOutcome>());
 
   const selectedConversation = useMemo(
     () => conversations.find(({ id }) => id === selectedId) ?? null,
@@ -120,7 +125,7 @@ export function useMessenger(currentUser: User) {
     await removeOutboxCommand(message.clientMessageId);
   }, [updateConversationSummary, updateHasNewer, updateMessages]);
 
-  const sendCommand = useCallback((command: OutboxCommand): Promise<'sent' | 'retryable' | 'blocked'> => new Promise((resolve) => {
+  const sendCommand = useCallback((command: OutboxCommand): Promise<SendOutcome> => new Promise((resolve) => {
     const socket = socketRef.current;
     if (!socket?.connected) {
       setPending((current) => current.map((item) => item.clientMessageId === command.clientMessageId ? { ...item, status: 'failed' } : item));
@@ -160,19 +165,28 @@ export function useMessenger(currentUser: User) {
     );
   }), [completeMessage]);
 
+  const runCommandWithRetries = useCallback(async (command: OutboxCommand): Promise<SendOutcome> => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const outcome = await sendCommand(command);
+      if (outcome !== 'retryable') return outcome;
+      if (attempt < 2 && socketRef.current?.connected) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
+      }
+    }
+    return 'retryable';
+  }, [sendCommand]);
+
+  const enqueueCommand = useCallback((command: OutboxCommand): Promise<SendOutcome> => {
+    return commandQueueRef.current.enqueue(command, runCommandWithRetries);
+  }, [runCommandWithRetries]);
+
   const replayOutbox = useCallback(async () => {
     const commands = await listOutboxCommands(currentUser.id);
     for (const command of commands) {
       if (command.blocked || !socketRef.current?.connected) continue;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const outcome = await sendCommand(command);
-        if (outcome !== 'retryable') break;
-        if (attempt < 2 && socketRef.current?.connected) {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
-        }
-      }
+      await enqueueCommand(command);
     }
-  }, [currentUser.id, sendCommand]);
+  }, [currentUser.id, enqueueCommand]);
 
   const markConversationRead = useCallback((conversationId: string, sequence: number) => {
     if (document.visibilityState !== 'visible') return;
@@ -223,7 +237,7 @@ export function useMessenger(currentUser: User) {
           });
         },
       });
-      if (!result.completed) return true;
+      if (!result.completed) return false;
       if (result.recoveredThrough > 0 && selectedIdRef.current === conversationId) {
         markConversationRead(conversationId, result.recoveredThrough);
       }
@@ -235,6 +249,38 @@ export function useMessenger(currentUser: User) {
       return false;
     }
   }, [getMessages, markConversationRead, updateMessages]);
+
+  const synchronizeSelected = useCallback((): Promise<boolean> => {
+    if (synchronizationRunRef.current) return synchronizationRunRef.current;
+
+    const run = (async () => {
+      setConnection('synchronizing');
+      const synchronized = await retryTask({
+        attempts: 3,
+        isActive: () => Boolean(socketRef.current?.connected),
+        task: recoverSelected,
+        wait: (delay) => new Promise<void>((resolve) => window.setTimeout(resolve, delay)),
+      });
+      if (synchronized) {
+        if (socketRef.current?.connected) setConnection('online');
+        return true;
+      }
+      if (socketRef.current?.connected) {
+        setError('Не удалось синхронизировать историю. Нажмите на статус «Синхронизация», чтобы повторить.');
+      }
+      return false;
+    })();
+
+    synchronizationRunRef.current = run;
+    void run.finally(() => {
+      if (synchronizationRunRef.current === run) synchronizationRunRef.current = null;
+    });
+    return run;
+  }, [recoverSelected]);
+
+  const retrySynchronization = useCallback(async () => {
+    if (await synchronizeSelected()) await replayOutbox();
+  }, [replayOutbox, synchronizeSelected]);
 
   useEffect(() => {
     let active = true;
@@ -264,11 +310,7 @@ export function useMessenger(currentUser: User) {
     setConnection('connecting');
 
     socket.on('connect', () => {
-      setConnection('synchronizing');
-      void recoverSelected().then((synchronized) => {
-        if (socket.connected) setConnection(synchronized ? 'online' : 'synchronizing');
-      });
-      void replayOutbox().catch(() => setError('Не удалось повторить очередь сообщений'));
+      void retrySynchronization().catch(() => setError('Не удалось повторить очередь сообщений'));
       void refetchConversations();
     });
     socket.on('disconnect', () => {
@@ -314,6 +356,11 @@ export function useMessenger(currentUser: User) {
         setSelectedId(null);
         selectedIdRef.current = null;
         clearSelectedMessages();
+        setHistoryLoading(false);
+        setOlderLoading(false);
+        setNewerLoading(false);
+        setHasOlder(false);
+        updateHasNewer(false);
       }
       void refetchConversations();
     });
@@ -326,7 +373,7 @@ export function useMessenger(currentUser: User) {
       socketRef.current = null;
       setRealtimeSocket(null);
     };
-  }, [clearSelectedMessages, completeMessage, currentUser.id, dispatch, markConversationRead, recoverSelected, refetchConversations, replayOutbox, updateMessages]);
+  }, [clearSelectedMessages, completeMessage, currentUser.id, dispatch, markConversationRead, refetchConversations, retrySynchronization, updateHasNewer, updateMessages]);
 
   useEffect(() => {
     const readVisibleConversation = () => {
@@ -347,7 +394,12 @@ export function useMessenger(currentUser: User) {
     selectionGenerationRef.current = generation;
     setSelectedId(conversation.id);
     selectedIdRef.current = conversation.id;
+    clearSelectedMessages();
     setHistoryLoading(true);
+    setOlderLoading(false);
+    setNewerLoading(false);
+    setHasOlder(false);
+    updateHasNewer(false);
     setError(null);
     try {
       const loaded = await getMessages({ id: conversation.id, limit: 50 }).unwrap();
@@ -357,6 +409,7 @@ export function useMessenger(currentUser: User) {
       recoveredThroughRef.current.set(conversation.id, loaded.at(-1)?.sequence ?? 0);
       setHasOlder(loaded.length === 50);
       updateHasNewer(false);
+      if (socketRef.current?.connected) setConnection('online');
       const latestSequence = loaded.at(-1)?.sequence;
       if (latestSequence !== undefined) markConversationRead(conversation.id, latestSequence);
     } catch (requestError) {
@@ -368,7 +421,7 @@ export function useMessenger(currentUser: User) {
         setHistoryLoading(false);
       }
     }
-  }, [getMessages, markConversationRead, updateHasNewer]);
+  }, [clearSelectedMessages, getMessages, markConversationRead, updateHasNewer]);
 
   const loadOlder = useCallback(async () => {
     const conversationId = selectedIdRef.current;
@@ -491,11 +544,11 @@ export function useMessenger(currentUser: User) {
         forwardedFrom: null,
         status: 'sending',
       }]);
-      void sendCommand(command);
+      void enqueueCommand(command);
     } catch {
       setError('Не удалось сохранить сообщение в локальную очередь');
     }
-  }, [currentUser, selectedId, sendCommand]);
+  }, [currentUser, enqueueCommand, selectedId]);
 
   const toggleReaction = useCallback(async (messageId: string, emoji: string) => {
     const conversationId = selectedIdRef.current;
@@ -533,8 +586,8 @@ export function useMessenger(currentUser: User) {
       forwardedFrom: command.forwardedFrom ?? null,
       status: 'sending',
     }]);
-    void sendCommand(command);
-  }, [currentUser, sendCommand]);
+    void enqueueCommand(command);
+  }, [currentUser, enqueueCommand]);
 
   const togglePin = useCallback(async (messageId: string) => {
     const conversationId = selectedIdRef.current;
@@ -554,9 +607,9 @@ export function useMessenger(currentUser: User) {
     if (command) {
       const retryCommand = { ...command, blocked: false };
       await saveOutboxCommand(retryCommand);
-      await sendCommand(retryCommand);
+      await enqueueCommand(retryCommand);
     }
-  }, [currentUser.id, sendCommand]);
+  }, [currentUser.id, enqueueCommand]);
 
   const openCreatedConversation = useCallback((conversation: Conversation) => {
     dispatch(messengerApi.util.invalidateTags([{ type: 'ConversationList', id: 'LIST' }]));
@@ -571,6 +624,7 @@ export function useMessenger(currentUser: User) {
     setHistoryLoading(false);
     setOlderLoading(false);
     setNewerLoading(false);
+    setHasOlder(false);
     updateHasNewer(false);
   }, [clearSelectedMessages, updateHasNewer]);
 
@@ -593,6 +647,7 @@ export function useMessenger(currentUser: User) {
     hasOlder,
     hasNewer,
     setError,
+    retrySynchronization,
     selectConversation,
     loadOlder,
     loadNewer,

@@ -29,4 +29,18 @@ describe('GroupCallRegistry', () => {
     expect(registry.hasUser('alice')).toBe(false);
     expect(registry.hasUser('bob')).toBe(true);
   });
+
+  it('rejects a second tab without replacing the current call owner', () => {
+    const registry = new GroupCallRegistry();
+    registry.join('conversation', 'alice', 'socket-a', 'audio');
+
+    expect(() => registry.join('conversation', 'alice', 'socket-b', 'audio')).toThrow('другой вкладке');
+    expect(registry.join('conversation', 'alice', 'socket-a', 'audio').existingParticipantIds).toEqual([]);
+    expect(registry.requireParticipant('conversation', 'alice', 'socket-a')).toBeDefined();
+    expect(() => registry.requireParticipant('conversation', 'alice', 'socket-b')).toThrow('вкладке');
+
+    expect(registry.leaveForSocket('socket-b')).toBeNull();
+    expect(registry.hasUser('alice')).toBe(true);
+    expect(registry.leaveForSocket('socket-a')).toMatchObject({ userId: 'alice' });
+  });
 });

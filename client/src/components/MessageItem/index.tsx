@@ -78,7 +78,7 @@ export function MessageItem({
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [reactionAnchor, setReactionAnchor] = useState<HTMLElement | null>(null);
   const [readersOpen, setReadersOpen] = useState(false);
-  const pinNotificationTarget = value.body.startsWith('📌 Закреплено сообщение: ')
+  const pinNotificationTarget = value.body.startsWith('📌 Закреплено сообщение')
     ? value.replyTo
     : null;
   const notificationKind = value.body.startsWith('📞')

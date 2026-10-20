@@ -24,6 +24,11 @@ export class GroupCallRegistry {
     }
     if (call.mode !== mode) throw errors.conflict(`В группе уже идёт ${call.mode === 'video' ? 'видеозвонок' : 'аудиозвонок'}`);
 
+    const ownerSocketId = call.socketIdByUser.get(userId);
+    if (ownerSocketId && ownerSocketId !== socketId) {
+      throw errors.conflict('Групповой звонок уже открыт в другой вкладке');
+    }
+
     const existingParticipantIds = [...call.participantIds].filter((id) => id !== userId);
     call.participantIds.add(userId);
     call.socketIdByUser.set(userId, socketId);

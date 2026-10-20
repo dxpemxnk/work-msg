@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Message } from '@/types/messenger';
 
-import { limitMessageWindow, mergeMessages, recoverMessagePages } from './messages';
+import { limitMessageWindow, mergeMessages, recoverMessagePages, retryTask } from './messages';
 
 const message = (id: string, clientMessageId: string, sequence: number): Message => ({
   id,
@@ -94,5 +94,34 @@ describe('limitMessageWindow', () => {
 
   it('does not copy or mark a window that already fits', () => {
     expect(limitMessageWindow(messages, 'newest', 10)).toEqual({ messages, trimmed: false });
+  });
+});
+
+describe('retryTask', () => {
+  it('recovers after a bounded temporary failure', async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const result = await retryTask({
+      attempts: 3,
+      isActive: () => true,
+      task: () => Promise.resolve(++calls === 2),
+      wait: (delay) => { delays.push(delay); return Promise.resolve(); },
+    });
+    expect(result).toBe(true);
+    expect(calls).toBe(2);
+    expect(delays).toEqual([500]);
+  });
+
+  it('stops retries when the selected operation is no longer active', async () => {
+    let active = true;
+    let calls = 0;
+    const result = await retryTask({
+      attempts: 3,
+      isActive: () => active,
+      task: () => { calls += 1; active = false; return Promise.resolve(false); },
+      wait: () => Promise.resolve(),
+    });
+    expect(result).toBe(false);
+    expect(calls).toBe(1);
   });
 });

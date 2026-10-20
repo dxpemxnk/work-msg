@@ -54,3 +54,26 @@ export async function recoverMessagePages({
   }
   return { recoveredThrough, completed: false };
 }
+
+type RetryTaskOptions = {
+  attempts: number;
+  isActive: () => boolean;
+  task: () => Promise<boolean>;
+  wait: (delayMs: number) => Promise<void>;
+  delayMs?: (attempt: number) => number;
+};
+
+export async function retryTask({
+  attempts,
+  isActive,
+  task,
+  wait,
+  delayMs = (attempt) => 500 * (2 ** attempt),
+}: RetryTaskOptions): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!isActive()) return false;
+    if (await task()) return true;
+    if (attempt < attempts - 1 && isActive()) await wait(delayMs(attempt));
+  }
+  return false;
+}
