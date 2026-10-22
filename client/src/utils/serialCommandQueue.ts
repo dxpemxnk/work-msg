@@ -9,9 +9,10 @@ export class SerialCommandQueue<TCommand extends { clientMessageId: string }, TR
     const run = this.tail.then(() => execute(command));
     this.tail = run.then(() => undefined, () => undefined);
     this.active.set(command.clientMessageId, run);
-    void run.finally(() => {
+    const release = () => {
       if (this.active.get(command.clientMessageId) === run) this.active.delete(command.clientMessageId);
-    });
+    };
+    void run.then(release, release);
     return run;
   }
 }

@@ -64,6 +64,7 @@ npm run build
 ## Документация
 
 - [Подробный разбор архитектуры](docs/PROJECT_GUIDE.md)
+- [Статус повторного review и регрессионных проверок](docs/REVIEW_STATUS_2026-10-22.md)
 - [Backend](server/README.md)
 - [Frontend](client/README.md)
 

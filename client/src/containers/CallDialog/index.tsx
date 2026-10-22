@@ -25,8 +25,8 @@ const statusLabel = (session: CallSession, elapsed: number) => {
     const seconds = (elapsed % 60).toString().padStart(2, '0');
     return `${minutes}:${seconds}`;
   }
-  if (session.direction === 'incoming') return 'Входящий звонок';
   if (session.status === 'connecting') return 'Соединение…';
+  if (session.direction === 'incoming') return 'Входящий звонок';
   return 'Вызов…';
 };
 
@@ -50,11 +50,11 @@ export function CallDialog({
   useEffect(() => {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = remoteStream;
-  }, [remoteStream, session?.mode]);
+  }, [remoteStream, session?.mode, session?.status]);
 
   useEffect(() => {
     if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
-  }, [localStream]);
+  }, [localStream, session?.mode, session?.status]);
 
   useEffect(() => {
     if (!session?.startedAt) {

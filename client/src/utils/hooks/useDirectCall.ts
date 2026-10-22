@@ -35,6 +35,7 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
   const remoteCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const localCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const signalingReadyRef = useRef(false);
+  const generationRef = useRef(0);
 
   const updateSession = useCallback((value: CallSession | null) => {
     sessionRef.current = value;
@@ -42,6 +43,7 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
   }, []);
 
   const cleanup = useCallback(() => {
+    generationRef.current += 1;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -95,13 +97,17 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
     return connection;
   }, [cleanup, socket, updateSession]);
 
-  const acquireMedia = useCallback(async (mode: CallMode) => {
+  const acquireMedia = useCallback(async (mode: CallMode, generation: number) => {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Браузер не поддерживает доступ к микрофону');
     const stream = await navigator.mediaDevices.getUserMedia(callConstraints(mode));
+    if (generation !== generationRef.current || !socket?.connected) {
+      stream.getTracks().forEach((track) => track.stop());
+      return null;
+    }
     localStreamRef.current = stream;
     setLocalStream(stream);
     return stream;
-  }, []);
+  }, [socket]);
 
   const startCall = useCallback(async (conversation: Conversation, mode: CallMode) => {
     if (!socket?.connected || conversation.type !== 'DIRECT' || sessionRef.current) return;
@@ -110,6 +116,7 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
 
     setNotice(null);
     const callId = crypto.randomUUID();
+    const generation = generationRef.current;
     const nextSession: CallSession = {
       callId,
       conversationId: conversation.id,
@@ -122,15 +129,18 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
     updateSession(nextSession);
 
     try {
-      const stream = await acquireMedia(mode);
+      const stream = await acquireMedia(mode, generation);
+      if (!stream) return;
       const connection = createConnection(callId);
       stream.getTracks().forEach((track) => connection.addTrack(track, stream));
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
+      if (generation !== generationRef.current || !socket.connected) return;
       socket.timeout(8000).emit(
         'call:start',
         { callId, conversationId: conversation.id, mode, offer },
         (timeoutError: Error | null, result?: CallAck) => {
+          if (generation !== generationRef.current) return;
           if (timeoutError || !result?.ok) {
             setNotice(result && !result.ok ? result.error.message : 'Сервер не ответил на запрос звонка');
             cleanup();
@@ -143,6 +153,7 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
         }
       );
     } catch {
+      if (generation !== generationRef.current) return;
       setNotice('Не удалось получить доступ к микрофону или камере');
       cleanup();
     }
@@ -151,10 +162,13 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
   const acceptCall = useCallback(async () => {
     const current = sessionRef.current;
     const offer = incomingOfferRef.current;
-    if (!socket?.connected || !current || current.direction !== 'incoming' || !offer) return;
+    if (!socket?.connected || !current || current.direction !== 'incoming' || current.status !== 'ringing' || !offer) return;
+    const generation = generationRef.current;
+    updateSession({ ...current, status: 'connecting' });
 
     try {
-      const stream = await acquireMedia(current.mode);
+      const stream = await acquireMedia(current.mode, generation);
+      if (!stream) return;
       const connection = createConnection(current.callId);
       stream.getTracks().forEach((track) => connection.addTrack(track, stream));
       await connection.setRemoteDescription(offer);
@@ -162,14 +176,17 @@ export function useDirectCall({ socket, currentUser }: UseDirectCallOptions) {
       signalingReadyRef.current = true;
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
+      if (generation !== generationRef.current || !socket.connected) return;
       updateSession({ ...current, status: 'connecting' });
       socket.emit('call:answer', { callId: current.callId, answer }, (result: CallAck) => {
+        if (generation !== generationRef.current) return;
         if (!result.ok) {
           setNotice(result.error.message);
           cleanup();
         }
       });
     } catch {
+      if (generation !== generationRef.current) return;
       socket.emit('call:reject', { callId: current.callId });
       setNotice('Не удалось получить доступ к микрофону или камере');
       cleanup();

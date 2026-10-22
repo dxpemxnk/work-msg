@@ -80,6 +80,7 @@
 
 .groupHeader {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   min-height: 22px;
@@ -266,7 +267,12 @@
 }
 
 .actions {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 8px;
   display: flex;
+  transform: translateY(-50%);
   align-self: center;
   padding: 2px;
   border: 1px solid #dde2ea;

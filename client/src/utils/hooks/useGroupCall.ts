@@ -35,6 +35,8 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const connectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const candidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
+  const generationRef = useRef(0);
+  const joiningRef = useRef(false);
 
   const updateSession = useCallback((value: GroupCallSession | null) => {
     sessionRef.current = value;
@@ -54,6 +56,8 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
   }, [updateSession]);
 
   const cleanup = useCallback(() => {
+    generationRef.current += 1;
+    joiningRef.current = false;
     connectionsRef.current.forEach((connection) => connection.close());
     connectionsRef.current.clear();
     candidatesRef.current.clear();
@@ -104,16 +108,24 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
   }, []);
 
   const joinCall = useCallback(async (conversation: Conversation, mode: CallMode) => {
-    if (!socket?.connected || conversation.type !== 'GROUP' || sessionRef.current) return;
+    if (!socket?.connected || conversation.type !== 'GROUP' || sessionRef.current || joiningRef.current) return;
+    const generation = generationRef.current;
+    joiningRef.current = true;
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error();
       const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints(mode));
+      if (generation !== generationRef.current || !socket.connected) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       localStreamRef.current = stream;
       setLocalStream(stream);
       socket.timeout(8000).emit(
         'group-call:join',
         { conversationId: conversation.id, mode },
         async (timeoutError: Error | null, result?: GroupCallAck) => {
+          if (generation !== generationRef.current || !socket.connected) return;
+          joiningRef.current = false;
           if (timeoutError || !result?.ok) {
             setNotice(result && !result.ok ? result.error.message : 'Сервер не ответил на запрос звонка');
             cleanup();
@@ -141,6 +153,7 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
         }
       );
     } catch {
+      if (generation !== generationRef.current) return;
       setNotice('Не удалось получить доступ к микрофону или камере');
       cleanup();
     }
@@ -230,9 +243,9 @@ export function useGroupCall({ socket, currentUser }: UseGroupCallOptions) {
       setAvailableCall((value) => value?.conversationId === conversationId ? null : value);
     };
     const onDisconnect = () => {
-      if (!sessionRef.current) return;
+      const active = Boolean(sessionRef.current) || joiningRef.current;
       cleanup();
-      setNotice('Групповой звонок завершён из-за потери связи');
+      if (active) setNotice('Групповой звонок завершён из-за потери связи');
     };
 
     socket.on('group-call:user-joined', onJoined);

@@ -11,6 +11,7 @@ import {
   Snackbar,
   TextField,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 
 import { ConnectionStatus } from '@components/ConnectionStatus';
@@ -47,7 +48,8 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
   const [search, setSearch] = useState('');
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [focusMessage, setFocusMessage] = useState<{ id: string; sequence: number; requestId: number } | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const wideLayout = useMediaQuery('(min-width:1200px)');
+  const [detailsOpen, setDetailsOpen] = useState(wideLayout);
   const [pinnedAnchorEl, setPinnedAnchorEl] = useState<HTMLElement | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
   const [profileUser, setProfileUser] = useState<User | null>(null);
@@ -82,12 +84,15 @@ export function MessengerWorkspace({ currentUser, onUserChange }: { currentUser:
   useEffect(() => {
     setReplyingTo(null);
     setFocusMessage(null);
-    setDetailsOpen(true);
     setPinnedAnchorEl(null);
     setForwardingMessage(null);
     setProfileUser(null);
     setProfileAnchorEl(null);
   }, [messenger.selectedId]);
+
+  useEffect(() => {
+    setDetailsOpen(wideLayout);
+  }, [messenger.selectedId, wideLayout]);
 
   const handleLogout = async () => {
     try {

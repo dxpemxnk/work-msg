@@ -907,6 +907,70 @@ describe('messenger server integration', () => {
     clients.forEach((client) => client.close());
   });
 
+  it('deduplicates an unacknowledged send replayed after reconnect', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const conversation = await direct(built, alexey, maria);
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const connect = async () => {
+      const client = socketClient(`http://127.0.0.1:${address.port}`, {
+        transports: ['websocket'], extraHeaders: { Cookie: alexey.cookie, Origin: origin },
+      });
+      await new Promise<void>((resolve, reject) => {
+        client.once('connection:ready', () => resolve()); client.once('connect_error', reject);
+      });
+      return client;
+    };
+    const command = { conversationId: conversation.id, clientMessageId: randomUUID(), body: 'Повтор после потери подтверждения' };
+    const first = await connect();
+    const saved = new Promise<MessageDto>(resolve => first.once('message:new', resolve));
+    first.emit('message:send', command);
+    const original = await saved;
+    first.close();
+    const second = await connect();
+    try {
+      const ack = await second.timeout(1000).emitWithAck('message:send', command) as { ok: boolean; deduplicated: boolean; message: MessageDto };
+      expect(ack).toMatchObject({ ok: true, deduplicated: true, message: { id: original.id, sequence: 1 } });
+      expect(built.repositories.messages.list(conversation.id, maria.user.id, { limit: 50 })).toHaveLength(1);
+    } finally { second.close(); }
+  });
+
+  it('keeps a three-person group call owned by its first tab and frees ownership after disconnect', async () => {
+    const alexey = await session(built, 'alexey');
+    const maria = await session(built, 'maria');
+    const dmitry = await session(built, 'dmitry');
+    const conversation = built.services.conversations.createGroup(alexey.user.id, 'Три участника', [maria.user.id, dmitry.user.id]);
+    await built.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = built.app.server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server address unavailable');
+    const clients = [alexey, alexey, maria, dmitry].map(actor => socketClient(`http://127.0.0.1:${address.port}`, {
+      transports: ['websocket'], extraHeaders: { Cookie: actor.cookie, Origin: origin },
+    }));
+    try {
+      await Promise.all(clients.map(client => new Promise<void>((resolve, reject) => {
+        client.once('connection:ready', () => resolve()); client.once('connect_error', reject);
+      })));
+      const [first, second, third, fourth] = clients as [Socket, Socket, Socket, Socket];
+      const join = (client: Socket) => client.timeout(1000).emitWithAck('group-call:join', { conversationId: conversation.id, mode: 'video' }) as Promise<unknown>;
+      await expect(join(first)).resolves.toMatchObject({ ok: true, participants: [] });
+      await expect(join(second)).resolves.toMatchObject({ ok: false });
+      await expect(join(third)).resolves.toMatchObject({ ok: true, participants: [{ id: alexey.user.id }] });
+      await expect(join(fourth)).resolves.toMatchObject({ ok: true, participants: [{ id: alexey.user.id }, { id: maria.user.id }] });
+      second.close();
+      const offer = new Promise<unknown>(resolve => third.once('group-call:offer', resolve));
+      first.emit('group-call:offer', { conversationId: conversation.id, targetUserId: maria.user.id, description: { type: 'offer', sdp: 'owner-still-active' } });
+      await expect(offer).resolves.toMatchObject({ description: { sdp: 'owner-still-active' } });
+      const left = new Promise<unknown>(resolve => third.once('group-call:user-left', resolve));
+      first.close();
+      await expect(left).resolves.toMatchObject({ userId: alexey.user.id });
+      second.connect();
+      await new Promise<void>((resolve, reject) => { second.once('connection:ready', () => resolve()); second.once('connect_error', reject); });
+      await expect(join(second)).resolves.toMatchObject({ ok: true, participants: [{ id: maria.user.id }, { id: dmitry.user.id }] });
+    } finally { clients.forEach(client => client.close()); }
+  });
+
   it('revokes group-call signaling when a participant is removed from the conversation', async () => {
     const alexey = await session(built, 'alexey');
     const dmitry = await session(built, 'dmitry');

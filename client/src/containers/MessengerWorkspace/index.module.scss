@@ -1,6 +1,7 @@
 .workspace {
   display: flex;
   height: 100vh;
+  height: 100dvh;
   padding: 0;
   background-color: #eef1f5;
 }
@@ -24,6 +25,10 @@
 .brand,
 .conversationTitle {
   font-weight: 700;
+}
+
+.contentHeader > :global(.MuiBox-root):not(.headerActions) {
+  min-width: 0;
 }
 
 .subtitle,

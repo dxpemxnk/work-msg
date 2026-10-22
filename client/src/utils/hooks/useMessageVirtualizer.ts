@@ -32,7 +32,9 @@ export function useMessageVirtualizer<T>({
     const element = parentRef.current;
     if (!element) return null;
     const scrollTop = element.scrollTop;
-    const anchor = virtualizer.getVirtualItems().find(({ end }) => end >= scrollTop);
+    // React's scroll handler can run before TanStack updates its rendered range.
+    // The full measurement cache already contains the row at the new offset.
+    const anchor = virtualizer.getVirtualItemForOffset(scrollTop);
     return {
       firstKey: keys[0],
       lastKey: keys.at(-1),

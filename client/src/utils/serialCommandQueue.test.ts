@@ -5,6 +5,13 @@ import { SerialCommandQueue } from './serialCommandQueue';
 type Command = { clientMessageId: string };
 
 describe('SerialCommandQueue', () => {
+  it('continues after a rejected command and allows retrying its id', async () => {
+    const queue = new SerialCommandQueue<Command, string>();
+    const failed = queue.enqueue({ clientMessageId: 'failed' }, () => Promise.reject(new Error('storage failure')));
+    await expect(failed).rejects.toThrow('storage failure');
+    await expect(queue.enqueue({ clientMessageId: 'next' }, () => Promise.resolve('next'))).resolves.toBe('next');
+    await expect(queue.enqueue({ clientMessageId: 'failed' }, () => Promise.resolve('retried'))).resolves.toBe('retried');
+  });
   it('executes different commands strictly in enqueue order', async () => {
     const queue = new SerialCommandQueue<Command, string>();
     const order: string[] = [];

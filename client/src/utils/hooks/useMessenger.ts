@@ -28,7 +28,7 @@ import { apiErrorMessage } from '@utils/apiError';
 import { limitMessageWindow, mergeMessages, recoverMessagePages, retryTask } from '@utils/messages';
 import { SerialCommandQueue } from '@utils/serialCommandQueue';
 
-type SendOutcome = 'sent' | 'retryable' | 'blocked';
+type SendOutcome = 'sent' | 'retryable' | 'blocked' | 'cancelled';
 
 export function useMessenger(currentUser: User) {
   const dispatch = useAppDispatch();
@@ -59,6 +59,9 @@ export function useMessenger(currentUser: User) {
   const hasNewerRef = useRef(false);
   const synchronizationRunRef = useRef<Promise<boolean> | null>(null);
   const commandQueueRef = useRef(new SerialCommandQueue<OutboxCommand, SendOutcome>());
+  const sessionEpochRef = useRef(0);
+  const transportEpochRef = useRef(0);
+  const sessionUserIdRef = useRef(currentUser.id);
 
   const selectedConversation = useMemo(
     () => conversations.find(({ id }) => id === selectedId) ?? null,
@@ -126,6 +129,11 @@ export function useMessenger(currentUser: User) {
   }, [updateConversationSummary, updateHasNewer, updateMessages]);
 
   const sendCommand = useCallback((command: OutboxCommand): Promise<SendOutcome> => new Promise((resolve) => {
+    const epoch = sessionEpochRef.current;
+    if (command.userId !== sessionUserIdRef.current) {
+      resolve('cancelled');
+      return;
+    }
     const socket = socketRef.current;
     if (!socket?.connected) {
       setPending((current) => current.map((item) => item.clientMessageId === command.clientMessageId ? { ...item, status: 'failed' } : item));
@@ -144,6 +152,10 @@ export function useMessenger(currentUser: User) {
         ...(command.forwardedFromMessageId ? { forwardedFromMessageId: command.forwardedFromMessageId } : {}),
       },
       (timeoutError: Error | null, result?: MessageAck) => {
+        if (epoch !== sessionEpochRef.current || socket !== socketRef.current) {
+          resolve('cancelled');
+          return;
+        }
         if (timeoutError || !result?.ok) {
           setPending((current) => current.map((item) => item.clientMessageId === command.clientMessageId ? { ...item, status: 'failed' } : item));
           if (result && !result.ok) {
@@ -166,7 +178,9 @@ export function useMessenger(currentUser: User) {
   }), [completeMessage]);
 
   const runCommandWithRetries = useCallback(async (command: OutboxCommand): Promise<SendOutcome> => {
+    const epoch = sessionEpochRef.current;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (epoch !== sessionEpochRef.current || command.userId !== sessionUserIdRef.current) return 'cancelled';
       const outcome = await sendCommand(command);
       if (outcome !== 'retryable') return outcome;
       if (attempt < 2 && socketRef.current?.connected) {
@@ -177,12 +191,16 @@ export function useMessenger(currentUser: User) {
   }, [sendCommand]);
 
   const enqueueCommand = useCallback((command: OutboxCommand): Promise<SendOutcome> => {
-    return commandQueueRef.current.enqueue(command, runCommandWithRetries);
+    const epoch = sessionEpochRef.current;
+    return commandQueueRef.current.enqueue(command, (queued) => epoch === sessionEpochRef.current
+      ? runCommandWithRetries(queued) : Promise.resolve('cancelled'));
   }, [runCommandWithRetries]);
 
   const replayOutbox = useCallback(async () => {
+    const epoch = sessionEpochRef.current;
     const commands = await listOutboxCommands(currentUser.id);
     for (const command of commands) {
+      if (epoch !== sessionEpochRef.current) return;
       if (command.blocked || !socketRef.current?.connected) continue;
       await enqueueCommand(command);
     }
@@ -213,7 +231,7 @@ export function useMessenger(currentUser: User) {
       .catch((requestError: unknown) => setError(apiErrorMessage(requestError)));
   }, [markRead, refetchConversations]);
 
-  const recoverSelected = useCallback(async (): Promise<boolean> => {
+  const recoverSelected = useCallback(async (isActive: () => boolean): Promise<boolean> => {
     const conversationId = selectedIdRef.current;
     if (!conversationId) return true;
     const generation = selectionGenerationRef.current;
@@ -224,7 +242,7 @@ export function useMessenger(currentUser: User) {
       const result = await recoverMessagePages({
         after: recoveredThrough,
         limit: 100,
-        isCurrent: () => selectedIdRef.current === conversationId && selectionGenerationRef.current === generation,
+        isCurrent: () => isActive() && selectedIdRef.current === conversationId && selectionGenerationRef.current === generation,
         loadPage: (after, limit) => getMessages({ id: conversationId, after, limit }).unwrap(),
         acceptPage: (page, pageEnd) => {
           recoveredThroughRef.current.set(conversationId, pageEnd);
@@ -243,7 +261,7 @@ export function useMessenger(currentUser: User) {
       }
       return true;
     } catch (requestError) {
-      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+      if (isActive() && selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
         setError(`История синхронизирована не полностью: ${apiErrorMessage(requestError)}`);
       }
       return false;
@@ -253,14 +271,21 @@ export function useMessenger(currentUser: User) {
   const synchronizeSelected = useCallback((): Promise<boolean> => {
     if (synchronizationRunRef.current) return synchronizationRunRef.current;
 
+    const generation = selectionGenerationRef.current;
+    const epoch = sessionEpochRef.current;
+    const transportEpoch = transportEpochRef.current;
+    const socket = socketRef.current;
+    const isCurrent = () => epoch === sessionEpochRef.current && transportEpoch === transportEpochRef.current
+      && generation === selectionGenerationRef.current && socket === socketRef.current && Boolean(socket?.connected);
     const run = (async () => {
       setConnection('synchronizing');
       const synchronized = await retryTask({
         attempts: 3,
-        isActive: () => Boolean(socketRef.current?.connected),
-        task: recoverSelected,
+        isActive: isCurrent,
+        task: () => recoverSelected(isCurrent),
         wait: (delay) => new Promise<void>((resolve) => window.setTimeout(resolve, delay)),
       });
+      if (!isCurrent()) return false;
       if (synchronized) {
         if (socketRef.current?.connected) setConnection('online');
         return true;
@@ -304,6 +329,8 @@ export function useMessenger(currentUser: User) {
   }, [currentUser]);
 
   useEffect(() => {
+    sessionEpochRef.current += 1;
+    sessionUserIdRef.current = currentUser.id;
     const socket = createMessengerSocket();
     socketRef.current = socket;
     setRealtimeSocket(socket);
@@ -314,6 +341,8 @@ export function useMessenger(currentUser: User) {
       void refetchConversations();
     });
     socket.on('disconnect', () => {
+      transportEpochRef.current += 1;
+      synchronizationRunRef.current = null;
       setConnection('offline');
       setOnlineUserIds(new Set());
     });
@@ -355,6 +384,8 @@ export function useMessenger(currentUser: User) {
         recoveredThroughRef.current.delete(conversationId);
         setSelectedId(null);
         selectedIdRef.current = null;
+        synchronizationRunRef.current = null;
+        if (socket.connected) setConnection('online');
         clearSelectedMessages();
         setHistoryLoading(false);
         setOlderLoading(false);
@@ -368,6 +399,8 @@ export function useMessenger(currentUser: User) {
     socket.connect();
 
     return () => {
+      sessionEpochRef.current += 1;
+      synchronizationRunRef.current = null;
       socket.removeAllListeners();
       socket.disconnect();
       socketRef.current = null;
@@ -390,6 +423,7 @@ export function useMessenger(currentUser: User) {
   }, [markConversationRead]);
 
   const selectConversation = useCallback(async (conversation: Conversation) => {
+    synchronizationRunRef.current = null;
     const generation = selectionGenerationRef.current + 1;
     selectionGenerationRef.current = generation;
     setSelectedId(conversation.id);
@@ -516,7 +550,9 @@ export function useMessenger(currentUser: User) {
       const results = await searchMessagesRequest({ id: conversationId, query: query.trim(), limit: 50 }).unwrap();
       return selectedIdRef.current === conversationId && selectionGenerationRef.current === generation ? results : [];
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
+      if (selectedIdRef.current === conversationId && selectionGenerationRef.current === generation) {
+        setError(apiErrorMessage(requestError));
+      }
       return [];
     }
   }, [searchMessagesRequest]);
@@ -618,6 +654,8 @@ export function useMessenger(currentUser: User) {
 
   const closeConversation = useCallback(() => {
     selectionGenerationRef.current += 1;
+    synchronizationRunRef.current = null;
+    if (socketRef.current?.connected) setConnection('online');
     setSelectedId(null);
     selectedIdRef.current = null;
     clearSelectedMessages();
